@@ -157,12 +157,13 @@ df_strat, latest_data, current_signal, target_leverage, c_entry, s_entry = run_s
 
 display_price = latest_data['Close']
 avg_entry = c_entry if c_entry > 0 else s_entry
+current_date_str = latest_data['Date'].strftime('%Y-%m-%d')
 
-st.header("1. Daily Execution Command")
+st.header(f"1. Daily Execution Command ({current_date_str})")
 col1, col2, col3, col4 = st.columns(4)
 with col1: st.metric(label="Action Signal", value=current_signal)
 with col2: st.metric(label="Target Leverage", value=f"{target_leverage:.2f}x")
-with col3: st.metric(label="Nasdaq 100", value=f"${display_price:,.2f}")
+with col3: st.metric(label=f"Nasdaq 100 (Live Data)", value=f"${display_price:,.2f}")
 with col4: st.metric(label="Avg Entry Price", value=f"${avg_entry:,.2f}" if avg_entry > 0 else "N/A")
 
 st.markdown("---")
@@ -174,7 +175,68 @@ c3.metric(label="2-Day RSI", value=f"{latest_data['RSI_2']:.1f}")
 c4.metric(label="ATR Size Multiplier", value=f"{latest_data['Size_Multiplier']:.2f}")
 
 st.markdown("---")
-st.header("3. Historical Backtest Results")
+
+# --- NEW: TOMORROW'S TRIGGER CALCULATOR ---
+st.header("3. Tomorrow's Trading Triggers")
+
+# Calculate variables for projecting tomorrow's price levels
+c_today = latest_data['Close']
+c_yesterday = df_strat.iloc[-2]['Close']
+d_today = c_today - c_yesterday
+
+def get_rsi_target(target_rsi):
+    r = target_rsi / (100 - target_rsi)
+    if target_rsi >= 50:
+        d_next = r * max(-d_today, 0) - max(d_today, 0)
+    else:
+        d_next = max(-d_today, 0) - max(d_today, 0) / r
+    return max(0.0, c_today + d_next)
+
+alpha_60, alpha_230 = 2 / 61, 2 / 231
+ema60_today, ema230_today = latest_data['EMA_60'], latest_data['EMA_230']
+trend_flip_tomorrow = ((1 - alpha_230) * ema230_today - (1 - alpha_60) * ema60_today) / (alpha_60 - alpha_230)
+
+st.markdown("*(These are the exact mathematical price levels on the Nasdaq 100 that will trigger a state change or trade execution **in tomorrow's session** based on today's closing data).*")
+
+col_t1, col_t2 = st.columns(2)
+
+with col_t1:
+    st.subheader("Macro Trend & Exits")
+    if trend_flip_tomorrow > 0 and trend_flip_tomorrow < (c_today * 2):
+        st.write(f"**Macro Trend Flip Level:** ${trend_flip_tomorrow:,.2f}")
+    else:
+        st.write("**Macro Trend Flip Level:** Not mathematically possible in 1 day.")
+        
+    if current_signal.startswith("CORE SHORT"):
+        st.write(f"**Take Profit (RSI < 50):** ${get_rsi_target(50):,.2f} or lower")
+        st.write(f"**Hard Stop Loss (5%):** ${avg_entry * 1.05:,.2f} or higher")
+    elif current_signal.startswith("SWING SHORT"):
+        st.write(f"**Take Profit (RSI < 40):** ${get_rsi_target(40):,.2f} or lower")
+        st.write(f"**Hard Stop Loss (5%):** ${avg_entry * 1.05:,.2f} or higher")
+    elif current_signal.startswith("CORE LONG"):
+        st.write("**Exits:** Liquidate to cash if Volatility Rank spikes ≥ 85%.")
+    else:
+        st.write("**Exits:** Currently in Cash. No active stop-losses.")
+
+with col_t2:
+    st.subheader("Short Entry Triggers")
+    if latest_data['Bull']:
+        st.write("Currently in a **Bull regime**. Short entries are disabled.")
+    else:
+        if latest_data['Volatile']:
+            st.write("**Core Short (Volatile) Triggers:**")
+            st.write(f"- Stage 1 (RSI > 75): **${get_rsi_target(75):,.2f}**")
+            st.write(f"- Stage 2 (RSI > 80): **${get_rsi_target(80):,.2f}**")
+            st.write(f"- Stage 3 (RSI > 85): **${get_rsi_target(85):,.2f}**")
+        else:
+            st.write("**Swing Short (Quiet) Triggers:**")
+            st.write(f"*(Note: Price must also close below EMA 10: ${latest_data['EMA_10']:,.2f})*")
+            st.write(f"- Stage 1 (RSI > 70): **${get_rsi_target(70):,.2f}**")
+            st.write(f"- Stage 2 (RSI > 80): **${get_rsi_target(80):,.2f}**")
+            st.write(f"- Stage 3 (RSI > 90): **${get_rsi_target(90):,.2f}**")
+
+st.markdown("---")
+st.header("4. Historical Backtest Results")
 cum_total = (1 + df_strat['Total_Strat_Ret']).cumprod()
 years_len = len(df_strat) / 252.0
 cagr = (cum_total.iloc[-1]) ** (1 / years_len) - 1
@@ -203,7 +265,7 @@ for yr in sorted(years, reverse=True):
 st.dataframe(pd.DataFrame(yearly_stats), use_container_width=True)
 
 st.markdown("---")
-st.header("4. Trade Log & Portfolio Tracker")
+st.header("5. Trade Log & Portfolio Tracker")
 
 # Manual Trade Input Form
 with st.form("trade_entry"):
@@ -236,7 +298,6 @@ for port_name, holdings in st.session_state.portfolios.items():
     if len(holdings) > 0:
         df_port = pd.DataFrame(holdings)
         
-        # Format the LTP column to exactly 4 decimal places
         styled_port = df_port.style.format({
             'Entry Price': "${:.2f}",
             'LTP': "${:.4f}"
@@ -245,5 +306,4 @@ for port_name, holdings in st.session_state.portfolios.items():
     else:
         st.write("No active trades logged.")
         
-# Starting Capital Tracker
 st.markdown(f"**Working Capital Base:** ${st.session_state.cash_usd:,.2f}")
