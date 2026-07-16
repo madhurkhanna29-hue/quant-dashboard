@@ -163,7 +163,7 @@ st.header(f"1. Daily Execution Command ({current_date_str})")
 col1, col2, col3, col4 = st.columns(4)
 with col1: st.metric(label="Action Signal", value=current_signal)
 with col2: st.metric(label="Target Leverage", value=f"{target_leverage:.2f}x")
-with col3: st.metric(label=f"Nasdaq 100 (Live Data)", value=f"${display_price:,.2f}")
+with col3: st.metric(label="Nasdaq 100 (Live Data)", value=f"${display_price:,.2f}")
 with col4: st.metric(label="Avg Entry Price", value=f"${avg_entry:,.2f}" if avg_entry > 0 else "N/A")
 
 st.markdown("---")
@@ -176,10 +176,9 @@ c4.metric(label="ATR Size Multiplier", value=f"{latest_data['Size_Multiplier']:.
 
 st.markdown("---")
 
-# --- NEW: TOMORROW'S TRIGGER CALCULATOR ---
+# --- 3. TOMORROW'S TRIGGER CALCULATOR ---
 st.header("3. Tomorrow's Trading Triggers")
 
-# Calculate variables for projecting tomorrow's price levels
 c_today = latest_data['Close']
 c_yesterday = df_strat.iloc[-2]['Close']
 d_today = c_today - c_yesterday
@@ -196,7 +195,7 @@ alpha_60, alpha_230 = 2 / 61, 2 / 231
 ema60_today, ema230_today = latest_data['EMA_60'], latest_data['EMA_230']
 trend_flip_tomorrow = ((1 - alpha_230) * ema230_today - (1 - alpha_60) * ema60_today) / (alpha_60 - alpha_230)
 
-st.markdown("*(These are the exact mathematical price levels on the Nasdaq 100 that will trigger a state change or trade execution **in tomorrow's session** based on today's closing data).*")
+st.markdown("*(These are the exact mathematical price levels or conditions required to trigger a new trade execution or state change in tomorrow's session).*")
 
 col_t1, col_t2 = st.columns(2)
 
@@ -207,33 +206,46 @@ with col_t1:
     else:
         st.write("**Macro Trend Flip Level:** Not mathematically possible in 1 day.")
         
-    if current_signal.startswith("CORE SHORT"):
+    if "CORE SHORT" in current_signal:
         st.write(f"**Take Profit (RSI < 50):** ${get_rsi_target(50):,.2f} or lower")
         st.write(f"**Hard Stop Loss (5%):** ${avg_entry * 1.05:,.2f} or higher")
-    elif current_signal.startswith("SWING SHORT"):
+    elif "SWING SHORT" in current_signal:
         st.write(f"**Take Profit (RSI < 40):** ${get_rsi_target(40):,.2f} or lower")
         st.write(f"**Hard Stop Loss (5%):** ${avg_entry * 1.05:,.2f} or higher")
-    elif current_signal.startswith("CORE LONG"):
+    elif "CORE LONG" in current_signal:
         st.write("**Exits:** Liquidate to cash if Volatility Rank spikes ≥ 85%.")
     else:
         st.write("**Exits:** Currently in Cash. No active stop-losses.")
 
 with col_t2:
-    st.subheader("Short Entry Triggers")
-    if latest_data['Bull']:
-        st.write("Currently in a **Bull regime**. Short entries are disabled.")
-    else:
-        if latest_data['Volatile']:
-            st.write("**Core Short (Volatile) Triggers:**")
-            st.write(f"- Stage 1 (RSI > 75): **${get_rsi_target(75):,.2f}**")
-            st.write(f"- Stage 2 (RSI > 80): **${get_rsi_target(80):,.2f}**")
-            st.write(f"- Stage 3 (RSI > 85): **${get_rsi_target(85):,.2f}**")
+    st.subheader("Pending Entry Conditions")
+    
+    if "CASH" in current_signal:
+        if latest_data['Bull'] and latest_data['Volatile']:
+            st.write("**Waiting for Volatility to Subside or Trend to Flip.**")
+            st.write(f"- **To go CORE LONG:** Volatility Rank must drop below 85% (Current: {latest_data['HV_Rank']*100:.1f}%).")
+            st.write("- **To go SHORT:** Macro Trend (EMA 60) must cross below EMA 230.")
         else:
-            st.write("**Swing Short (Quiet) Triggers:**")
-            st.write(f"*(Note: Price must also close below EMA 10: ${latest_data['EMA_10']:,.2f})*")
-            st.write(f"- Stage 1 (RSI > 70): **${get_rsi_target(70):,.2f}**")
-            st.write(f"- Stage 2 (RSI > 80): **${get_rsi_target(80):,.2f}**")
-            st.write(f"- Stage 3 (RSI > 90): **${get_rsi_target(90):,.2f}**")
+            st.write("**Waiting for an RSI Overbought Spike.**")
+            if latest_data['Volatile']:
+                st.write(f"- **To enter CORE SHORT (Stage 1):** RSI > 75 (Target: **${get_rsi_target(75):,.2f}**)")
+            else:
+                st.write(f"- **To enter SWING SHORT (Stage 1):** RSI > 70 (Target: **${get_rsi_target(70):,.2f}**)")
+                st.write(f"*(Note: Price must also close below EMA 10: ${latest_data['EMA_10']:,.2f})*")
+                
+    elif "CORE LONG" in current_signal:
+        st.write("**Status: Fully Invested.**")
+        st.write("No new entry conditions pending. Riding the Bull Quiet trend.")
+        
+    elif "CORE SHORT" in current_signal:
+        st.write("**Waiting for Further RSI Spikes to Scale In:**")
+        st.write(f"- **Stage 2 (RSI > 80):** **${get_rsi_target(80):,.2f}**")
+        st.write(f"- **Stage 3 (RSI > 85):** **${get_rsi_target(85):,.2f}**")
+        
+    elif "SWING SHORT" in current_signal:
+        st.write("**Waiting for Further RSI Spikes to Scale In:**")
+        st.write(f"- **Stage 2 (RSI > 80):** **${get_rsi_target(80):,.2f}**")
+        st.write(f"- **Stage 3 (RSI > 90):** **${get_rsi_target(90):,.2f}**")
 
 st.markdown("---")
 st.header("4. Historical Backtest Results")
@@ -307,3 +319,4 @@ for port_name, holdings in st.session_state.portfolios.items():
         st.write("No active trades logged.")
         
 st.markdown(f"**Working Capital Base:** ${st.session_state.cash_usd:,.2f}")
+
