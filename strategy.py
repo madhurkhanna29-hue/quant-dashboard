@@ -2,6 +2,7 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import plotly.graph_objects as go
 from datetime import datetime
 
 # --- 1. CONFIGURATION & STATE ---
@@ -56,6 +57,7 @@ def run_strategy(df):
     df['Volatile'] = df['HV_Rank'] >= 0.85
 
     core_sig, swing_sig = [], []
+    stop_out_points = np.full(len(df), np.nan)
     
     short_exposure, swing_exposure = 0.0, 0.0
     core_entry_price, swing_entry_price = 0.0, 0.0
@@ -76,12 +78,13 @@ def run_strategy(df):
             core_entry_price = 0.0
             short_regime_blocked = False
             
-            # Pure regime adherence. No micro-stops. 
+            # Pure regime adherence
             core_sig.append(1.0 * size_mult)
                 
         elif bear and v:
-            # 5% Hard Stop on the short side ONLY to prevent squeeze blowups
+            # 5% Hard Stop on the short side ONLY
             if short_exposure < 0 and core_entry_price > 0 and price > core_entry_price * 1.05:
+                stop_out_points[i] = price
                 short_exposure = 0.0
                 core_entry_price = 0.0
                 short_regime_blocked = True
@@ -113,6 +116,7 @@ def run_strategy(df):
         # --- SWING SYSTEM ---
         if core_sig[-1] == 0:
             if swing_exposure < 0 and swing_entry_price > 0 and price > swing_entry_price * 1.05:
+                stop_out_points[i] = price
                 swing_exposure = 0.0
                 swing_entry_price = 0.0
                 swing_regime_blocked = True
@@ -147,9 +151,21 @@ def run_strategy(df):
 
     df['Core_Sig'] = core_sig
     df['Swing_Sig'] = swing_sig
+    df['Stop_Out'] = stop_out_points
     
     df['Core_Sig'] = df['Core_Sig'].shift(1).fillna(0)
     df['Swing_Sig'] = df['Swing_Sig'].shift(1).fillna(0)
+    
+    # Calculate Plot Triggers
+    df['Prev_Core_Sig'] = df['Core_Sig'].shift(1).fillna(0)
+    df['Prev_Swing_Sig'] = df['Swing_Sig'].shift(1).fillna(0)
+    
+    df['Long_Entry'] = np.where((df['Core_Sig'] > 0) & (df['Prev_Core_Sig'] <= 0), df['Close'], np.nan)
+    df['Short_Entry'] = np.where(
+        ((df['Core_Sig'] < 0) & (df['Prev_Core_Sig'] >= 0)) | 
+        ((df['Swing_Sig'] < 0) & (df['Prev_Swing_Sig'] >= 0)), 
+        df['Close'], np.nan
+    )
     
     df['Ret_3x'] = df['Ret'] * 3
     df['Ret_1x'] = df['Ret']
@@ -187,7 +203,53 @@ with col2: st.metric(label="Target Leverage", value=f"{target_leverage:.2f}x")
 with col3: st.metric(label="Nasdaq 100 (Live Data)", value=f"${display_price:,.2f}")
 with col4: st.metric(label="Avg Entry Price", value=f"${avg_entry:,.2f}" if avg_entry > 0 else "N/A")
 
+# --- CHART RESTORED HERE ---
+st.markdown("#### Interactive Strategy Map")
+df_plot = df_strat.tail(600).copy()
+
+fig = go.Figure()
+
+fig.add_trace(go.Scatter(x=df_plot['Date'], y=df_plot['Close'], name='NDX Close', line=dict(color='#1f77b4', width=2)))
+fig.add_trace(go.Scatter(x=df_plot['Date'], y=df_plot['EMA_60'], name='EMA 60 (Fast)', line=dict(color='#ff7f0e', width=1.5, dash='dash')))
+fig.add_trace(go.Scatter(x=df_plot['Date'], y=df_plot['EMA_230'], name='EMA 230 (Slow)', line=dict(color='#d62728', width=1.5, dash='dot')))
+
+fig.add_trace(go.Scatter(
+    x=df_plot['Date'], y=df_plot['Long_Entry'],
+    name='Long Entry Trigger',
+    mode='markers',
+    marker=dict(symbol='triangle-up', size=11, color='#2ca02c', line=dict(width=1, color='black')),
+    hovertemplate='<b>Long Entry</b><br>Date: %{x}<br>Price: $%{y:,.2f}<extra></extra>'
+))
+
+fig.add_trace(go.Scatter(
+    x=df_plot['Date'], y=df_plot['Short_Entry'],
+    name='Short Entry Trigger',
+    mode='markers',
+    marker=dict(symbol='triangle-down', size=11, color='#d62728', line=dict(width=1, color='black')),
+    hovertemplate='<b>Short Entry</b><br>Date: %{x}<br>Price: $%{y:,.2f}<extra></extra>'
+))
+
+fig.add_trace(go.Scatter(
+    x=df_plot['Date'], y=df_plot['Stop_Out'],
+    name='Short Stop Out Hit (5%)',
+    mode='markers',
+    marker=dict(symbol='x', size=10, color='#ff7f0e', line=dict(width=1.5, color='black')),
+    hovertemplate='<b>Stop Loss Triggered</b><br>Date: %{x}<br>Price: $%{y:,.2f}<extra></extra>'
+))
+
+fig.update_layout(
+    template='plotly_white',
+    hovermode='x unified',
+    xaxis=dict(title="Date", rangeslider=dict(visible=True)),
+    yaxis=dict(title="Nasdaq 100 Price (USD)", side="right"),
+    margin=dict(l=10, r=10, t=20, b=10),
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    height=470
+)
+
+st.plotly_chart(fig, use_container_width=True)
 st.markdown("---")
+
 st.header("2. Regime Diagnostics")
 c1, c2, c3, c4 = st.columns(4)
 c1.metric(label="Macro Trend (60/230)", value="Bullish" if latest_data['Bull'] else "Bearish")
@@ -232,7 +294,7 @@ with col_t1:
         st.write(f"**Take Profit (RSI < 40):** ${get_rsi_target(40):,.2f} or lower")
         st.write(f"**Hard Stop Loss (5%):** ${avg_entry * 1.05:,.2f} or higher")
     elif "CORE LONG" in current_signal:
-        st.write("**Exits:** Liquidate to cash if Volatility Rank spikes ≥ 85%.")
+        st.write("**Exits:** Liquidate to cash if Volatility Rank spikes ≥ 85% or Macro Trend flips bearish.")
     else:
         st.write("**Exits:** Currently in Cash. No active stop-losses.")
 
