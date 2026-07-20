@@ -63,6 +63,7 @@ def run_strategy(df):
     short_exposure, swing_exposure = 0.0, 0.0
     core_entry_price, swing_entry_price = 0.0, 0.0
     long_entry_price = 0.0
+    long_regime_blocked = False # State flag to prevent catching falling knives
 
     for i in range(len(df)):
         price = df['Close'].iloc[i]
@@ -79,34 +80,37 @@ def run_strategy(df):
             short_exposure = 0.0
             core_entry_price = 0.0
             
-            if long_entry_price == 0.0:
-                long_entry_price = price
-            
-            # 5% Hard Stop Loss for Long Positions
-            if long_entry_price > 0.0 and price < long_entry_price * 0.95:
-                stop_out_points[i] = price
-                long_entry_price = 0.0
-                core_sig.append(0.0) # Force to Cash
-                stop_triggered = True
+            if not long_regime_blocked:
+                if long_entry_price == 0.0:
+                    long_entry_price = price
+                
+                # Triggers hard 5% stop
+                if long_entry_price > 0.0 and price < long_entry_price * 0.95:
+                    stop_out_points[i] = price
+                    long_entry_price = 0.0
+                    long_regime_blocked = True # Block re-entries until trend resets completely
+                    core_sig.append(0.0)
+                    stop_triggered = True
+                else:
+                    core_sig.append(1.0 * size_mult)
             else:
-                core_sig.append(1.0 * size_mult)
+                core_sig.append(0.0) # Stay in cash while blocked
                 
         elif bear and v:
+            # Reset long tracking states when regime shifts to Bear Volatile
             long_entry_price = 0.0
+            long_regime_blocked = False
             
-            # 5% Hard Stop Loss for Short Positions
             if short_exposure < 0 and core_entry_price > 0 and price > core_entry_price * 1.05:
                 stop_out_points[i] = price
                 short_exposure = 0.0
                 core_entry_price = 0.0
                 stop_triggered = True
                 
-            # Take Profit Exit
             if short_exposure < 0 and rsi < 50:
                 short_exposure = 0.0
                 core_entry_price = 0.0
                 
-            # Entry / Scaling Logic (Only evaluated if a stop was not hit today)
             if not stop_triggered:
                 if short_exposure == 0.0 and rsi > 75:
                     short_exposure = -0.33 * size_mult
@@ -120,9 +124,11 @@ def run_strategy(df):
                     
             core_sig.append(short_exposure)
         else:
+            # Clear blocks and exposures if we exit the trend structure
             short_exposure = 0.0
             core_entry_price = 0.0
             long_entry_price = 0.0
+            long_regime_blocked = False
             core_sig.append(0.0)
             
         # --- SWING SYSTEM ---
@@ -165,7 +171,6 @@ def run_strategy(df):
     df['Core_Sig'] = df['Core_Sig'].shift(1).fillna(0)
     df['Swing_Sig'] = df['Swing_Sig'].shift(1).fillna(0)
     
-    # Calculate unique entries for plotting
     df['Prev_Core_Sig'] = df['Core_Sig'].shift(1).fillna(0)
     df['Prev_Swing_Sig'] = df['Swing_Sig'].shift(1).fillna(0)
     
@@ -222,12 +227,10 @@ df_plot = df_strat.tail(600).copy()
 
 fig = go.Figure()
 
-# Underlay Benchmarks and Trends
 fig.add_trace(go.Scatter(x=df_plot['Date'], y=df_plot['Close'], name='NDX Close', line=dict(color='#1f77b4', width=2)))
 fig.add_trace(go.Scatter(x=df_plot['Date'], y=df_plot['EMA_60'], name='EMA 60 (Fast)', line=dict(color='#ff7f0e', width=1.5, dash='dash')))
 fig.add_trace(go.Scatter(x=df_plot['Date'], y=df_plot['EMA_230'], name='EMA 230 (Slow)', line=dict(color='#d62728', width=1.5, dash='dot')))
 
-# Overlay Green Long Entries
 fig.add_trace(go.Scatter(
     x=df_plot['Date'], y=df_plot['Long_Entry'],
     name='Long Entry Trigger',
@@ -236,7 +239,6 @@ fig.add_trace(go.Scatter(
     hovertemplate='<b>Long Entry</b><br>Date: %{x}<br>Price: $%{y:,.2f}<extra></extra>'
 ))
 
-# Overlay Red Short Entries
 fig.add_trace(go.Scatter(
     x=df_plot['Date'], y=df_plot['Short_Entry'],
     name='Short Entry Trigger',
@@ -245,7 +247,6 @@ fig.add_trace(go.Scatter(
     hovertemplate='<b>Short Entry</b><br>Date: %{x}<br>Price: $%{y:,.2f}<extra></extra>'
 ))
 
-# Overlay Orange Stop Out Points
 fig.add_trace(go.Scatter(
     x=df_plot['Date'], y=df_plot['Stop_Out'],
     name='Stop Loss Hit (5%)',
@@ -351,11 +352,13 @@ with col_t2:
 
 st.markdown("---")
 st.header("4. Historical Backtest Results")
-cum_total = (1 + df_strat['Total_Strat_Ret']).cumprod()
-years_len = len(df_strat) / 252.0
+# Clean data drops early indicators warming up phase to display pristine historical stats
+df_metrics = df_strat.dropna(subset=['HV_Rank', 'ATR_Baseline']).copy()
+cum_total = (1 + df_metrics['Total_Strat_Ret']).cumprod()
+years_len = len(df_metrics) / 252.0
 cagr = (cum_total.iloc[-1]) ** (1 / years_len) - 1
-vol = df_strat['Total_Strat_Ret'].std() * np.sqrt(252)
-sharpe = (df_strat['Total_Strat_Ret'].mean() * 252) / vol
+vol = df_metrics['Total_Strat_Ret'].std() * np.sqrt(252)
+sharpe = (df_metrics['Total_Strat_Ret'].mean() * 252) / vol
 max_dd = (cum_total / cum_total.cummax() - 1).min()
 
 c1, c2, c3, c4 = st.columns(4)
@@ -365,10 +368,10 @@ c3.metric(label="Sharpe Ratio", value=f"{sharpe:.2f}")
 c4.metric(label="Annualized Vol", value=f"{vol*100:.2f}%")
 
 st.subheader("Yearly Performance Table")
-years = df_strat['Date'].dt.year.unique()
+years = df_metrics['Date'].dt.year.unique()
 yearly_stats = []
 for yr in sorted(years, reverse=True):
-    df_yr = df_strat[df_strat['Date'].dt.year == yr]
+    df_yr = df_metrics[df_metrics['Date'].dt.year == yr]
     strat_perf = (1 + df_yr['Total_Strat_Ret']).prod() - 1
     bh_perf = (1 + df_yr['Ret']).prod() - 1
     yearly_stats.append({
@@ -418,4 +421,3 @@ for port_name, holdings in st.session_state.portfolios.items():
         st.write("No active trades logged.")
         
 st.markdown(f"**Working Capital Base:** ${st.session_state.cash_usd:,.2f}")
-
