@@ -58,14 +58,9 @@ def run_strategy(df):
     df['Volatile'] = df['HV_Rank'] >= 0.85
 
     core_sig, swing_sig = [], []
-    stop_out_points = np.full(len(df), np.nan)
-    watermarks = np.full(len(df), np.nan)
     
     short_exposure, swing_exposure = 0.0, 0.0
     core_entry_price, swing_entry_price = 0.0, 0.0
-    long_entry_price = 0.0
-    long_high_watermark = 0.0
-    long_regime_blocked = False
 
     for i in range(len(df)):
         price = df['Close'].iloc[i]
@@ -82,34 +77,15 @@ def run_strategy(df):
             short_exposure = 0.0
             core_entry_price = 0.0
             
-            if not long_regime_blocked:
-                if long_entry_price == 0.0:
-                    long_entry_price = price
-                    long_high_watermark = price
-                else:
-                    # TRUE TRAILING STOP: Update highest close seen
-                    long_high_watermark = max(long_high_watermark, price)
-                
-                # Check price against 5% drop from the PEAK, not the entry
-                if long_high_watermark > 0.0 and price < long_high_watermark * 0.95:
-                    stop_out_points[i] = price
-                    long_entry_price = 0.0
-                    long_high_watermark = 0.0
-                    long_regime_blocked = True 
-                    core_sig.append(0.0)
-                    stop_triggered = True
-                else:
-                    core_sig.append(1.0 * size_mult)
+            # Dynamic Momentum Floor (Replaces broken fixed stop/lockout)
+            if price > ema_10:
+                core_sig.append(1.0 * size_mult)
             else:
-                core_sig.append(0.0) 
+                core_sig.append(0.0) # Step aside to cash on momentum breaks
                 
         elif bear and v:
-            long_entry_price = 0.0
-            long_high_watermark = 0.0
-            long_regime_blocked = False
-            
+            # 5% Hard stop on underlying index for the Short Position
             if short_exposure < 0 and core_entry_price > 0 and price > core_entry_price * 1.05:
-                stop_out_points[i] = price
                 short_exposure = 0.0
                 core_entry_price = 0.0
                 stop_triggered = True
@@ -133,15 +109,11 @@ def run_strategy(df):
         else:
             short_exposure = 0.0
             core_entry_price = 0.0
-            long_entry_price = 0.0
-            long_high_watermark = 0.0
-            long_regime_blocked = False
             core_sig.append(0.0)
             
         # --- SWING SYSTEM ---
         if core_sig[-1] == 0:
             if swing_exposure < 0 and swing_entry_price > 0 and price > swing_entry_price * 1.05:
-                stop_out_points[i] = price
                 swing_exposure = 0.0
                 swing_entry_price = 0.0
                 stop_triggered = True
@@ -171,16 +143,13 @@ def run_strategy(df):
             swing_entry_price = 0.0
             swing_sig.append(0.0)
 
-        watermarks[i] = long_high_watermark
-
     df['Core_Sig'] = core_sig
     df['Swing_Sig'] = swing_sig
-    df['Stop_Out'] = stop_out_points
-    df['Watermark'] = watermarks
     
     df['Core_Sig'] = df['Core_Sig'].shift(1).fillna(0)
     df['Swing_Sig'] = df['Swing_Sig'].shift(1).fillna(0)
     
+    # Calculate Plot Triggers
     df['Prev_Core_Sig'] = df['Core_Sig'].shift(1).fillna(0)
     df['Prev_Swing_Sig'] = df['Swing_Sig'].shift(1).fillna(0)
     
@@ -191,36 +160,36 @@ def run_strategy(df):
         df['Close'], np.nan
     )
     
+    # Dynamic trailing stop out points for UI plotting
+    df['Stop_Out'] = np.where((df['Prev_Core_Sig'] > 0) & (df['Core_Sig'] == 0) & (df['Bull']) & (df['Quiet']), df['Close'], np.nan)
+    
+    # FIX: Explicit 1x Returns array for Short routing
     df['Ret_3x'] = df['Ret'] * 3
-    df['Ret_m3x'] = df['Ret'] * -3
     df['Ret_1x'] = df['Ret']
     
-    df['Core_Ret'] = np.where(df['Core_Sig'] > 0, df['Ret_3x'] * df['Core_Sig'], np.where(df['Core_Sig'] < 0, df['Ret_m3x'] * abs(df['Core_Sig']), 0))
-    df['Swing_Ret'] = np.where(df['Swing_Sig'] > 0, df['Ret_1x'] * df['Swing_Sig'], np.where(df['Swing_Sig'] < 0, df['Ret_1x'] * df['Swing_Sig'], 0))
+    # FIX: Core Longs use 3x. Core Shorts strictly use 1x to cap squeeze drawdowns.
+    df['Core_Ret'] = np.where(df['Core_Sig'] > 0, df['Ret_3x'] * df['Core_Sig'], np.where(df['Core_Sig'] < 0, df['Ret_1x'] * df['Core_Sig'], 0))
+    df['Swing_Ret'] = np.where(df['Swing_Sig'] < 0, df['Ret_1x'] * df['Swing_Sig'], 0)
+    
     df['Total_Strat_Ret'] = df['Core_Ret'] + df['Swing_Ret']
     
     last = df.iloc[-1]
     
     if last['Core_Sig'] > 0: signal, leverage = "CORE LONG", last['Core_Sig'] * 3.0
-    elif last['Core_Sig'] < 0: signal, leverage = "CORE SHORT", last['Core_Sig'] * 3.0
-    elif last['Swing_Sig'] < 0: signal, leverage = "SWING SHORT", last['Swing_Sig'] * 1.0
+    elif last['Core_Sig'] < 0: signal, leverage = "CORE SHORT", abs(last['Core_Sig']) * 1.0
+    elif last['Swing_Sig'] < 0: signal, leverage = "SWING SHORT", abs(last['Swing_Sig']) * 1.0
     else: signal, leverage = "CASH (Regime Filtered)", 0.0
         
-    return df, last, signal, leverage, core_entry_price, swing_entry_price, long_entry_price, long_high_watermark
+    return df, last, signal, leverage, core_entry_price, swing_entry_price
 
 # --- 3. UI RENDERING ---
 st.title("Systematic 4-Quadrant Strategy (USD)")
 
 df_market = load_data()
-df_strat, latest_data, current_signal, target_leverage, c_entry, s_entry, l_entry, l_watermark = run_strategy(df_market)
+df_strat, latest_data, current_signal, target_leverage, c_entry, s_entry = run_strategy(df_market)
 
 display_price = latest_data['Close']
-if c_entry > 0:
-    avg_entry = c_entry
-elif s_entry > 0:
-    avg_entry = s_entry
-else:
-    avg_entry = l_entry
+avg_entry = c_entry if c_entry > 0 else s_entry
 
 current_date_str = latest_data['Date'].strftime('%Y-%m-%d')
 
@@ -238,16 +207,10 @@ df_plot = df_strat.tail(600).copy()
 fig = go.Figure()
 
 fig.add_trace(go.Scatter(x=df_plot['Date'], y=df_plot['Close'], name='NDX Close', line=dict(color='#1f77b4', width=2)))
+fig.add_trace(go.Scatter(x=df_plot['Date'], y=df_plot['EMA_10'], name='EMA 10 (Momentum Floor)', line=dict(color='rgba(44, 160, 44, 0.6)', width=1.5)))
 fig.add_trace(go.Scatter(x=df_plot['Date'], y=df_plot['EMA_60'], name='EMA 60 (Fast)', line=dict(color='#ff7f0e', width=1.5, dash='dash')))
 fig.add_trace(go.Scatter(x=df_plot['Date'], y=df_plot['EMA_230'], name='EMA 230 (Slow)', line=dict(color='#d62728', width=1.5, dash='dot')))
 
-# Overlay actual trailing watermark line for visibility
-fig.add_trace(go.Scatter(
-    x=df_plot['Date'], y=df_plot['Watermark'], 
-    name='Trailing Peak', 
-    line=dict(color='rgba(44, 160, 44, 0.4)', width=1.5), 
-    hoverinfo='skip'
-))
 
 fig.add_trace(go.Scatter(
     x=df_plot['Date'], y=df_plot['Long_Entry'],
@@ -267,10 +230,10 @@ fig.add_trace(go.Scatter(
 
 fig.add_trace(go.Scatter(
     x=df_plot['Date'], y=df_plot['Stop_Out'],
-    name='Stop Loss Hit (5%)',
+    name='Step-Aside / Stop Out',
     mode='markers',
     marker=dict(symbol='x', size=10, color='#ff7f0e', line=dict(width=1.5, color='black')),
-    hovertemplate='<b>Stop Loss Triggered</b><br>Date: %{x}<br>Price: $%{y:,.2f}<extra></extra>'
+    hovertemplate='<b>Stop / Step-Aside Triggered</b><br>Date: %{x}<br>Price: $%{y:,.2f}<extra></extra>'
 ))
 
 fig.update_layout(
@@ -333,7 +296,7 @@ with col_t1:
         st.write(f"**Take Profit (RSI < 40):** ${get_rsi_target(40):,.2f} or lower")
         st.write(f"**Hard Stop Loss (5%):** ${avg_entry * 1.05:,.2f} or higher")
     elif "CORE LONG" in current_signal:
-        st.write(f"**Trailing Stop Loss (5% from Peak):** ${l_watermark * 0.95:,.2f} or lower")
+        st.write(f"**Trailing Momentum Stop:** Liquidate to cash if Price closes below EMA 10 (**${latest_data['EMA_10']:,.2f}**)")
         st.write("**Volatility Exit:** Liquidate to cash if Volatility Rank spikes ≥ 85%.")
     else:
         st.write("**Exits:** Currently in Cash. No active stop-losses.")
@@ -346,6 +309,9 @@ with col_t2:
             st.write("**Waiting for Volatility to Subside or Trend to Flip.**")
             st.write(f"- **To go CORE LONG:** Volatility Rank must drop below 85% (Current: {latest_data['HV_Rank']*100:.1f}%).")
             st.write("- **To go SHORT:** Macro Trend (EMA 60) must cross below EMA 230.")
+        elif latest_data['Bull'] and latest_data['Quiet']:
+            st.write("**Waiting for Momentum Recovery.**")
+            st.write(f"- **To re-enter CORE LONG:** Price must close above EMA 10 (**${latest_data['EMA_10']:,.2f}**)")
         else:
             st.write("**Waiting for an RSI Overbought Spike.**")
             if latest_data['Volatile']:
@@ -356,7 +322,7 @@ with col_t2:
                 
     elif "CORE LONG" in current_signal:
         st.write("**Status: Fully Invested.**")
-        st.write("No new entry conditions pending. Riding the Bull Quiet trend.")
+        st.write("No new entry conditions pending. Riding the Bull Quiet trend above EMA 10.")
         
     elif "CORE SHORT" in current_signal:
         st.write("**Waiting for Further RSI Spikes to Scale In:**")
@@ -376,7 +342,7 @@ cum_total = (1 + df_metrics['Total_Strat_Ret']).cumprod()
 years_len = len(df_metrics) / 252.0
 cagr = (cum_total.iloc[-1]) ** (1 / years_len) - 1
 vol = df_metrics['Total_Strat_Ret'].std() * np.sqrt(252)
-sharpe = (df_metrics['Total_Strat_Ret'].mean() * 252) / vol
+sharpe = (df_metrics['Total_Strat_Ret'].mean() * 252) / (vol + 1e-10)
 max_dd = (cum_total / cum_total.cummax() - 1).min()
 
 c1, c2, c3, c4 = st.columns(4)
