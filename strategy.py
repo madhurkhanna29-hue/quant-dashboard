@@ -2,7 +2,6 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
 from datetime import datetime
 
 # --- 1. CONFIGURATION & STATE ---
@@ -31,7 +30,6 @@ def load_data():
 def run_strategy(df):
     df['Ret'] = df['Close'].pct_change()
     
-    # Indicators
     df['EMA_60'] = df['Close'].ewm(span=60, adjust=False).mean()
     df['EMA_230'] = df['Close'].ewm(span=230, adjust=False).mean()
     df['Bull'] = df['EMA_60'] > df['EMA_230']
@@ -61,6 +59,8 @@ def run_strategy(df):
     
     short_exposure, swing_exposure = 0.0, 0.0
     core_entry_price, swing_entry_price = 0.0, 0.0
+    short_regime_blocked = False
+    swing_regime_blocked = False
 
     for i in range(len(df)):
         price = df['Close'].iloc[i]
@@ -69,32 +69,30 @@ def run_strategy(df):
         q, v = df['Quiet'].iloc[i], df['Volatile'].iloc[i]
         ema_10 = df['EMA_10'].iloc[i]
         size_mult = df['Size_Multiplier'].iloc[i] if not pd.isna(df['Size_Multiplier'].iloc[i]) else 1.0
-            
-        stop_triggered = False
 
         # --- CORE SYSTEM ---
         if bull and q:
             short_exposure = 0.0
             core_entry_price = 0.0
+            short_regime_blocked = False
             
-            # Dynamic Momentum Floor (Replaces broken fixed stop/lockout)
-            if price > ema_10:
-                core_sig.append(1.0 * size_mult)
-            else:
-                core_sig.append(0.0) # Step aside to cash on momentum breaks
+            # Pure regime adherence. No micro-stops. 
+            core_sig.append(1.0 * size_mult)
                 
         elif bear and v:
-            # 5% Hard stop on underlying index for the Short Position
+            # 5% Hard Stop on the short side ONLY to prevent squeeze blowups
             if short_exposure < 0 and core_entry_price > 0 and price > core_entry_price * 1.05:
                 short_exposure = 0.0
                 core_entry_price = 0.0
-                stop_triggered = True
+                short_regime_blocked = True
                 
-            if short_exposure < 0 and rsi < 50:
+            # Unblock shorting once the squeeze exhausts
+            if rsi < 50:
                 short_exposure = 0.0
                 core_entry_price = 0.0
+                short_regime_blocked = False
                 
-            if not stop_triggered:
+            if not short_regime_blocked:
                 if short_exposure == 0.0 and rsi > 75:
                     short_exposure = -0.33 * size_mult
                     core_entry_price = price
@@ -109,6 +107,7 @@ def run_strategy(df):
         else:
             short_exposure = 0.0
             core_entry_price = 0.0
+            short_regime_blocked = False
             core_sig.append(0.0)
             
         # --- SWING SYSTEM ---
@@ -116,13 +115,14 @@ def run_strategy(df):
             if swing_exposure < 0 and swing_entry_price > 0 and price > swing_entry_price * 1.05:
                 swing_exposure = 0.0
                 swing_entry_price = 0.0
-                stop_triggered = True
+                swing_regime_blocked = True
                 
-            if swing_exposure < 0 and rsi < 40:
+            if rsi < 40:
                 swing_exposure = 0.0
                 swing_entry_price = 0.0
+                swing_regime_blocked = False
                 
-            if bear and q and not stop_triggered:
+            if bear and q and not swing_regime_blocked:
                 if price < ema_10:
                     if swing_exposure == 0.0 and rsi > 70:
                         swing_exposure = -0.33 * size_mult
@@ -137,10 +137,12 @@ def run_strategy(df):
                 if not (bear and q):
                     swing_exposure = 0.0
                     swing_entry_price = 0.0
+                    swing_regime_blocked = False
             swing_sig.append(swing_exposure)
         else:
             swing_exposure = 0.0
             swing_entry_price = 0.0
+            swing_regime_blocked = False
             swing_sig.append(0.0)
 
     df['Core_Sig'] = core_sig
@@ -149,25 +151,10 @@ def run_strategy(df):
     df['Core_Sig'] = df['Core_Sig'].shift(1).fillna(0)
     df['Swing_Sig'] = df['Swing_Sig'].shift(1).fillna(0)
     
-    # Calculate Plot Triggers
-    df['Prev_Core_Sig'] = df['Core_Sig'].shift(1).fillna(0)
-    df['Prev_Swing_Sig'] = df['Swing_Sig'].shift(1).fillna(0)
-    
-    df['Long_Entry'] = np.where((df['Core_Sig'] > 0) & (df['Prev_Core_Sig'] <= 0), df['Close'], np.nan)
-    df['Short_Entry'] = np.where(
-        ((df['Core_Sig'] < 0) & (df['Prev_Core_Sig'] >= 0)) | 
-        ((df['Swing_Sig'] < 0) & (df['Prev_Swing_Sig'] >= 0)), 
-        df['Close'], np.nan
-    )
-    
-    # Dynamic trailing stop out points for UI plotting
-    df['Stop_Out'] = np.where((df['Prev_Core_Sig'] > 0) & (df['Core_Sig'] == 0) & (df['Bull']) & (df['Quiet']), df['Close'], np.nan)
-    
-    # FIX: Explicit 1x Returns array for Short routing
     df['Ret_3x'] = df['Ret'] * 3
     df['Ret_1x'] = df['Ret']
     
-    # FIX: Core Longs use 3x. Core Shorts strictly use 1x to cap squeeze drawdowns.
+    # Core Long is exposed to 3x. Shorting is strictly capped at 1x to prevent inverse decay and blowups.
     df['Core_Ret'] = np.where(df['Core_Sig'] > 0, df['Ret_3x'] * df['Core_Sig'], np.where(df['Core_Sig'] < 0, df['Ret_1x'] * df['Core_Sig'], 0))
     df['Swing_Ret'] = np.where(df['Swing_Sig'] < 0, df['Ret_1x'] * df['Swing_Sig'], 0)
     
@@ -193,7 +180,6 @@ avg_entry = c_entry if c_entry > 0 else s_entry
 
 current_date_str = latest_data['Date'].strftime('%Y-%m-%d')
 
-# --- SECTION 1 ---
 st.header(f"1. Daily Execution Command ({current_date_str})")
 col1, col2, col3, col4 = st.columns(4)
 with col1: st.metric(label="Action Signal", value=current_signal)
@@ -201,55 +187,7 @@ with col2: st.metric(label="Target Leverage", value=f"{target_leverage:.2f}x")
 with col3: st.metric(label="Nasdaq 100 (Live Data)", value=f"${display_price:,.2f}")
 with col4: st.metric(label="Avg Entry Price", value=f"${avg_entry:,.2f}" if avg_entry > 0 else "N/A")
 
-st.markdown("#### Interactive Strategy Map")
-df_plot = df_strat.tail(600).copy()
-
-fig = go.Figure()
-
-fig.add_trace(go.Scatter(x=df_plot['Date'], y=df_plot['Close'], name='NDX Close', line=dict(color='#1f77b4', width=2)))
-fig.add_trace(go.Scatter(x=df_plot['Date'], y=df_plot['EMA_10'], name='EMA 10 (Momentum Floor)', line=dict(color='rgba(44, 160, 44, 0.6)', width=1.5)))
-fig.add_trace(go.Scatter(x=df_plot['Date'], y=df_plot['EMA_60'], name='EMA 60 (Fast)', line=dict(color='#ff7f0e', width=1.5, dash='dash')))
-fig.add_trace(go.Scatter(x=df_plot['Date'], y=df_plot['EMA_230'], name='EMA 230 (Slow)', line=dict(color='#d62728', width=1.5, dash='dot')))
-
-
-fig.add_trace(go.Scatter(
-    x=df_plot['Date'], y=df_plot['Long_Entry'],
-    name='Long Entry Trigger',
-    mode='markers',
-    marker=dict(symbol='triangle-up', size=11, color='#2ca02c', line=dict(width=1, color='black')),
-    hovertemplate='<b>Long Entry</b><br>Date: %{x}<br>Price: $%{y:,.2f}<extra></extra>'
-))
-
-fig.add_trace(go.Scatter(
-    x=df_plot['Date'], y=df_plot['Short_Entry'],
-    name='Short Entry Trigger',
-    mode='markers',
-    marker=dict(symbol='triangle-down', size=11, color='#d62728', line=dict(width=1, color='black')),
-    hovertemplate='<b>Short Entry</b><br>Date: %{x}<br>Price: $%{y:,.2f}<extra></extra>'
-))
-
-fig.add_trace(go.Scatter(
-    x=df_plot['Date'], y=df_plot['Stop_Out'],
-    name='Step-Aside / Stop Out',
-    mode='markers',
-    marker=dict(symbol='x', size=10, color='#ff7f0e', line=dict(width=1.5, color='black')),
-    hovertemplate='<b>Stop / Step-Aside Triggered</b><br>Date: %{x}<br>Price: $%{y:,.2f}<extra></extra>'
-))
-
-fig.update_layout(
-    template='plotly_white',
-    hovermode='x unified',
-    xaxis=dict(title="Date", rangeslider=dict(visible=True)),
-    yaxis=dict(title="Nasdaq 100 Price (USD)", side="right"),
-    margin=dict(l=10, r=10, t=20, b=10),
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-    height=470
-)
-
-st.plotly_chart(fig, use_container_width=True)
 st.markdown("---")
-
-# --- REGIME DIAGNOSTICS ---
 st.header("2. Regime Diagnostics")
 c1, c2, c3, c4 = st.columns(4)
 c1.metric(label="Macro Trend (60/230)", value="Bullish" if latest_data['Bull'] else "Bearish")
@@ -258,8 +196,6 @@ c3.metric(label="2-Day RSI", value=f"{latest_data['RSI_2']:.1f}")
 c4.metric(label="ATR Size Multiplier", value=f"{latest_data['Size_Multiplier']:.2f}")
 
 st.markdown("---")
-
-# --- TOMORROW'S TRIGGER CALCULATOR ---
 st.header("3. Tomorrow's Trading Triggers")
 
 c_today = latest_data['Close']
@@ -296,8 +232,7 @@ with col_t1:
         st.write(f"**Take Profit (RSI < 40):** ${get_rsi_target(40):,.2f} or lower")
         st.write(f"**Hard Stop Loss (5%):** ${avg_entry * 1.05:,.2f} or higher")
     elif "CORE LONG" in current_signal:
-        st.write(f"**Trailing Momentum Stop:** Liquidate to cash if Price closes below EMA 10 (**${latest_data['EMA_10']:,.2f}**)")
-        st.write("**Volatility Exit:** Liquidate to cash if Volatility Rank spikes ≥ 85%.")
+        st.write("**Exits:** Liquidate to cash if Volatility Rank spikes ≥ 85%.")
     else:
         st.write("**Exits:** Currently in Cash. No active stop-losses.")
 
@@ -309,9 +244,6 @@ with col_t2:
             st.write("**Waiting for Volatility to Subside or Trend to Flip.**")
             st.write(f"- **To go CORE LONG:** Volatility Rank must drop below 85% (Current: {latest_data['HV_Rank']*100:.1f}%).")
             st.write("- **To go SHORT:** Macro Trend (EMA 60) must cross below EMA 230.")
-        elif latest_data['Bull'] and latest_data['Quiet']:
-            st.write("**Waiting for Momentum Recovery.**")
-            st.write(f"- **To re-enter CORE LONG:** Price must close above EMA 10 (**${latest_data['EMA_10']:,.2f}**)")
         else:
             st.write("**Waiting for an RSI Overbought Spike.**")
             if latest_data['Volatile']:
@@ -322,7 +254,7 @@ with col_t2:
                 
     elif "CORE LONG" in current_signal:
         st.write("**Status: Fully Invested.**")
-        st.write("No new entry conditions pending. Riding the Bull Quiet trend above EMA 10.")
+        st.write("No new entry conditions pending. Riding the Bull Quiet trend.")
         
     elif "CORE SHORT" in current_signal:
         st.write("**Waiting for Further RSI Spikes to Scale In:**")
@@ -405,4 +337,3 @@ for port_name, holdings in st.session_state.portfolios.items():
         st.write("No active trades logged.")
         
 st.markdown(f"**Working Capital Base:** ${st.session_state.cash_usd:,.2f}")
-
