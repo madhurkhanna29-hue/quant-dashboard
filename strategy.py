@@ -149,26 +149,23 @@ def run_strategy(df):
             swing_regime_blocked = False
             swing_sig.append(0.0)
 
-        # --- TRADE LOGGING ENGINE ---
+        # --- TRADE LOGGING ENGINE (Part 1: Capture Indexes) ---
         current_date = df['Date'].iloc[i]
         c_sig = core_sig[-1]
         p_sig = core_sig[-2] if len(core_sig) > 1 else 0.0
         
-        # Long Tracker
         if c_sig > 0 and p_sig <= 0:
-            active_long = {'Type': 'LONG (3x)', 'Entry Date': current_date, 'Entry Price': price, 'Entry Condition': 'Bull Market + Quiet Volatility'}
+            active_long = {'Type': 'LONG (3x)', 'Entry Date': current_date, 'Entry Price': price, 'Entry Condition': 'Bull Market + Quiet Volatility', 'Entry_Idx': i}
         elif c_sig <= 0 and p_sig > 0 and active_long:
             active_long['Exit Date'] = current_date
             active_long['Exit Price'] = price
             active_long['Exit Condition'] = 'Macro Flipped Bearish' if not bull else 'Volatility Spiked (Rank ≥ 85%)'
-            pnl = ((price - active_long['Entry Price']) / active_long['Entry Price']) * 3.0 * 100
-            active_long['PnL (%)'] = pnl
+            active_long['Exit_Idx'] = i
             trade_log.append(active_long)
             active_long = None
 
-        # Core Short Tracker
         if c_sig < 0 and p_sig >= 0:
-            active_core_short = {'Type': 'CORE SHORT (1x)', 'Entry Date': current_date, 'Entry Price': core_entry_price, 'Entry Condition': 'Bear Market + RSI Squeeze'}
+            active_core_short = {'Type': 'CORE SHORT (1x)', 'Entry Date': current_date, 'Entry Price': core_entry_price, 'Entry Condition': 'Bear Market + RSI Squeeze', 'Entry_Idx': i}
         elif c_sig < 0 and p_sig < 0 and c_sig < p_sig and active_core_short:
             active_core_short['Entry Price'] = core_entry_price 
             active_core_short['Entry Condition'] += ' (Scaled)'
@@ -176,17 +173,15 @@ def run_strategy(df):
             active_core_short['Exit Date'] = current_date
             active_core_short['Exit Price'] = price
             active_core_short['Exit Condition'] = '5% Hard Stop Hit' if short_regime_blocked else ('Take Profit (RSI < 50)' if rsi < 50 else 'Regime Shifted')
-            pnl = ((active_core_short['Entry Price'] - price) / active_core_short['Entry Price']) * 1.0 * 100
-            active_core_short['PnL (%)'] = pnl
+            active_core_short['Exit_Idx'] = i
             trade_log.append(active_core_short)
             active_core_short = None
 
-        # Swing Short Tracker
         s_sig = swing_sig[-1]
         ps_sig = swing_sig[-2] if len(swing_sig) > 1 else 0.0
         
         if s_sig < 0 and ps_sig >= 0:
-            active_swing_short = {'Type': 'SWING SHORT (1x)', 'Entry Date': current_date, 'Entry Price': swing_entry_price, 'Entry Condition': 'Bear Quiet + Price < EMA10 + RSI Squeeze'}
+            active_swing_short = {'Type': 'SWING SHORT (1x)', 'Entry Date': current_date, 'Entry Price': swing_entry_price, 'Entry Condition': 'Bear Quiet + Price < EMA10 + RSI Squeeze', 'Entry_Idx': i}
         elif s_sig < 0 and ps_sig < 0 and s_sig < ps_sig and active_swing_short:
             active_swing_short['Entry Price'] = swing_entry_price 
             active_swing_short['Entry Condition'] += ' (Scaled)'
@@ -194,28 +189,24 @@ def run_strategy(df):
             active_swing_short['Exit Date'] = current_date
             active_swing_short['Exit Price'] = price
             active_swing_short['Exit Condition'] = '5% Hard Stop Hit' if swing_regime_blocked else ('Take Profit (RSI < 40)' if rsi < 40 else 'Regime Shifted')
-            pnl = ((active_swing_short['Entry Price'] - price) / active_swing_short['Entry Price']) * 1.0 * 100
-            active_swing_short['PnL (%)'] = pnl
+            active_swing_short['Exit_Idx'] = i
             trade_log.append(active_swing_short)
             active_swing_short = None
 
-    last_price = df['Close'].iloc[-1]
+    last_idx = len(df) - 1
     if active_long:
         active_long['Exit Date'], active_long['Exit Price'], active_long['Exit Condition'] = pd.NaT, np.nan, 'Trade Open'
-        active_long['PnL (%)'] = ((last_price - active_long['Entry Price']) / active_long['Entry Price']) * 3.0 * 100
+        active_long['Exit_Idx'] = last_idx
         trade_log.append(active_long)
     if active_core_short:
         active_core_short['Exit Date'], active_core_short['Exit Price'], active_core_short['Exit Condition'] = pd.NaT, np.nan, 'Trade Open'
-        active_core_short['PnL (%)'] = ((active_core_short['Entry Price'] - last_price) / active_core_short['Entry Price']) * 1.0 * 100
+        active_core_short['Exit_Idx'] = last_idx
         trade_log.append(active_core_short)
     if active_swing_short:
         active_swing_short['Exit Date'], active_swing_short['Exit Price'], active_swing_short['Exit Condition'] = pd.NaT, np.nan, 'Trade Open'
-        active_swing_short['PnL (%)'] = ((active_swing_short['Entry Price'] - last_price) / active_swing_short['Entry Price']) * 1.0 * 100
+        active_swing_short['Exit_Idx'] = last_idx
         trade_log.append(active_swing_short)
 
-    df_trades = pd.DataFrame(trade_log)
-
-    # FIX: Explicitly map lists into DataFrame columns BEFORE shifting
     df['Core_Sig'] = core_sig
     df['Swing_Sig'] = swing_sig
     
@@ -231,12 +222,28 @@ def run_strategy(df):
     
     df['Ret_3x'] = df['Ret'] * 3
     df['Ret_1x'] = df['Ret']
+    
     df['Core_Ret'] = np.where(df['Core_Sig'] > 0, df['Ret_3x'] * df['Core_Sig'], np.where(df['Core_Sig'] < 0, df['Ret_1x'] * df['Core_Sig'], 0))
     df['Swing_Ret'] = np.where(df['Swing_Sig'] < 0, df['Ret_1x'] * df['Swing_Sig'], 0)
     df['Total_Strat_Ret'] = df['Core_Ret'] + df['Swing_Ret']
     
-    last = df.iloc[-1]
+    # --- TRADE LOGGING ENGINE (Part 2: True Compounded PnL) ---
+    # We map the exact daily strategy returns to the exact days the trade was active
+    for t in trade_log:
+        e_idx = t['Entry_Idx']
+        x_idx = t['Exit_Idx']
+        if e_idx < x_idx:
+            # Compounding the daily returns from the day after entry up to the exit day
+            true_pnl = (np.prod(1 + df['Total_Strat_Ret'].iloc[e_idx+1 : x_idx+1]) - 1) * 100
+        else:
+            true_pnl = 0.0
+        t['PnL (%)'] = true_pnl
+        
+    df_trades = pd.DataFrame(trade_log)
+    if not df_trades.empty:
+        df_trades = df_trades.drop(columns=['Entry_Idx', 'Exit_Idx'])
     
+    last = df.iloc[-1]
     if last['Core_Sig'] > 0: signal, leverage = "CORE LONG", last['Core_Sig'] * 3.0
     elif last['Core_Sig'] < 0: signal, leverage = "CORE SHORT", abs(last['Core_Sig']) * 1.0
     elif last['Swing_Sig'] < 0: signal, leverage = "SWING SHORT", abs(last['Swing_Sig']) * 1.0
@@ -398,6 +405,7 @@ st.dataframe(pd.DataFrame(yearly_stats), use_container_width=True)
 
 st.markdown("---")
 st.header("5. Historical Trade Ledger")
+st.markdown("*(Note: Cross-year trades may show a large positive PnL here, while the Yearly Performance table splits that return strictly across calendar years).*")
 
 if not df_trades.empty:
     df_trades['Year'] = df_trades['Exit Date'].dt.year.fillna(df_trades['Entry Date'].dt.year).astype(int)
@@ -467,3 +475,4 @@ for port_name, holdings in st.session_state.portfolios.items():
         st.write("No active trades logged.")
         
 st.markdown(f"**Working Capital Base:** ${st.session_state.cash_usd:,.2f}")
+
