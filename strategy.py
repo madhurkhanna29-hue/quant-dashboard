@@ -57,11 +57,18 @@ def run_strategy(df):
     df['Volatile'] = df['HV_Rank'] >= 0.85
 
     core_sig, swing_sig = [], []
+    stop_out_points = np.full(len(df), np.nan)
     
     short_exposure, swing_exposure = 0.0, 0.0
     core_entry_price, swing_entry_price = 0.0, 0.0
     short_regime_blocked = False
     swing_regime_blocked = False
+    
+    # NEW: Trade Ledger Trackers
+    trade_log = []
+    active_long = None
+    active_core_short = None
+    active_swing_short = None
 
     for i in range(len(df)):
         price = df['Close'].iloc[i]
@@ -76,12 +83,10 @@ def run_strategy(df):
             short_exposure = 0.0
             core_entry_price = 0.0
             short_regime_blocked = False
-            
-            # Pure regime adherence. 
             core_sig.append(1.0 * size_mult)
-                
         elif bear and v:
             if short_exposure < 0 and core_entry_price > 0 and price > core_entry_price * 1.05:
+                stop_out_points[i] = price
                 short_exposure = 0.0
                 core_entry_price = 0.0
                 short_regime_blocked = True
@@ -112,6 +117,7 @@ def run_strategy(df):
         # --- SWING SYSTEM ---
         if core_sig[-1] == 0:
             if swing_exposure < 0 and swing_entry_price > 0 and price > swing_entry_price * 1.05:
+                stop_out_points[i] = price
                 swing_exposure = 0.0
                 swing_entry_price = 0.0
                 swing_regime_blocked = True
@@ -144,40 +150,89 @@ def run_strategy(df):
             swing_regime_blocked = False
             swing_sig.append(0.0)
 
-    df['Core_Sig'] = core_sig
-    df['Swing_Sig'] = swing_sig
-    
+        # ==========================================
+        # --- TRADE LOGGING ENGINE ---
+        # ==========================================
+        current_date = df['Date'].iloc[i]
+        c_sig = core_sig[-1]
+        p_sig = core_sig[-2] if len(core_sig) > 1 else 0.0
+        
+        # Long Tracker
+        if c_sig > 0 and p_sig <= 0:
+            active_long = {'Type': 'LONG (3x)', 'Entry Date': current_date, 'Entry Price': price, 'Entry Condition': 'Bull Market + Quiet Volatility'}
+        elif c_sig <= 0 and p_sig > 0 and active_long:
+            active_long['Exit Date'] = current_date
+            active_long['Exit Price'] = price
+            active_long['Exit Condition'] = 'Macro Flipped Bearish' if not bull else 'Volatility Spiked (Rank ≥ 85%)'
+            pnl = ((price - active_long['Entry Price']) / active_long['Entry Price']) * 3.0 * 100
+            active_long['PnL (%)'] = pnl
+            trade_log.append(active_long)
+            active_long = None
+
+        # Core Short Tracker
+        if c_sig < 0 and p_sig >= 0:
+            active_core_short = {'Type': 'CORE SHORT (1x)', 'Entry Date': current_date, 'Entry Price': core_entry_price, 'Entry Condition': 'Bear Market + RSI Squeeze'}
+        elif c_sig < 0 and p_sig < 0 and c_sig < p_sig and active_core_short:
+            active_core_short['Entry Price'] = core_entry_price 
+            active_core_short['Entry Condition'] += ' (Scaled)'
+        elif c_sig >= 0 and p_sig < 0 and active_core_short:
+            active_core_short['Exit Date'] = current_date
+            active_core_short['Exit Price'] = price
+            active_core_short['Exit Condition'] = '5% Hard Stop Hit' if short_regime_blocked else ('Take Profit (RSI < 50)' if rsi < 50 else 'Regime Shifted')
+            pnl = ((active_core_short['Entry Price'] - price) / active_core_short['Entry Price']) * 1.0 * 100
+            active_core_short['PnL (%)'] = pnl
+            trade_log.append(active_core_short)
+            active_core_short = None
+
+        # Swing Short Tracker
+        s_sig = swing_sig[-1]
+        ps_sig = swing_sig[-2] if len(swing_sig) > 1 else 0.0
+        
+        if s_sig < 0 and ps_sig >= 0:
+            active_swing_short = {'Type': 'SWING SHORT (1x)', 'Entry Date': current_date, 'Entry Price': swing_entry_price, 'Entry Condition': 'Bear Quiet + Price < EMA10 + RSI Squeeze'}
+        elif s_sig < 0 and ps_sig < 0 and s_sig < ps_sig and active_swing_short:
+            active_swing_short['Entry Price'] = swing_entry_price 
+            active_swing_short['Entry Condition'] += ' (Scaled)'
+        elif s_sig >= 0 and ps_sig < 0 and active_swing_short:
+            active_swing_short['Exit Date'] = current_date
+            active_swing_short['Exit Price'] = price
+            active_swing_short['Exit Condition'] = '5% Hard Stop Hit' if swing_regime_blocked else ('Take Profit (RSI < 40)' if rsi < 40 else 'Regime Shifted')
+            pnl = ((active_swing_short['Entry Price'] - price) / active_swing_short['Entry Price']) * 1.0 * 100
+            active_swing_short['PnL (%)'] = pnl
+            trade_log.append(active_swing_short)
+            active_swing_short = None
+
+    # Append Open Trades at the end
+    last_price = df['Close'].iloc[-1]
+    if active_long:
+        active_long['Exit Date'], active_long['Exit Price'], active_long['Exit Condition'] = pd.NaT, np.nan, 'Trade Open'
+        active_long['PnL (%)'] = ((last_price - active_long['Entry Price']) / active_long['Entry Price']) * 3.0 * 100
+        trade_log.append(active_long)
+    if active_core_short:
+        active_core_short['Exit Date'], active_core_short['Exit Price'], active_core_short['Exit Condition'] = pd.NaT, np.nan, 'Trade Open'
+        active_core_short['PnL (%)'] = ((active_core_short['Entry Price'] - last_price) / active_core_short['Entry Price']) * 1.0 * 100
+        trade_log.append(active_core_short)
+    if active_swing_short:
+        active_swing_short['Exit Date'], active_swing_short['Exit Price'], active_swing_short['Exit Condition'] = pd.NaT, np.nan, 'Trade Open'
+        active_swing_short['PnL (%)'] = ((active_swing_short['Entry Price'] - last_price) / active_swing_short['Entry Price']) * 1.0 * 100
+        trade_log.append(active_swing_short)
+
+    df_trades = pd.DataFrame(trade_log)
+
     df['Core_Sig'] = df['Core_Sig'].shift(1).fillna(0)
     df['Swing_Sig'] = df['Swing_Sig'].shift(1).fillna(0)
     
-    # --- CHART LOGIC FIX: Explicitly mapping Entry & Exits ---
     df['Prev_Core_Sig'] = df['Core_Sig'].shift(1).fillna(0)
     df['Prev_Swing_Sig'] = df['Swing_Sig'].shift(1).fillna(0)
-    
-    # Long triggers when signal shifts from 0 or negative to positive
     df['Long_Entry'] = np.where((df['Core_Sig'] > 0) & (df['Prev_Core_Sig'] <= 0), df['Close'], np.nan)
-    
-    # Short triggers when signal shifts from 0 or positive to negative
-    df['Short_Entry'] = np.where(
-        ((df['Core_Sig'] < 0) & (df['Prev_Core_Sig'] >= 0)) | 
-        ((df['Swing_Sig'] < 0) & (df['Prev_Swing_Sig'] >= 0)), 
-        df['Close'], np.nan
-    )
-    
-    # Exit triggers when returning to CASH (0) from any position, or instantly flipping regimes
-    df['Position_Exit'] = np.where(
-        ((df['Prev_Core_Sig'] > 0) & (df['Core_Sig'] <= 0)) | 
-        ((df['Prev_Core_Sig'] < 0) & (df['Core_Sig'] >= 0)) |
-        ((df['Prev_Swing_Sig'] < 0) & (df['Swing_Sig'] >= 0)), 
-        df['Close'], np.nan
-    )
+    df['Short_Entry'] = np.where(((df['Core_Sig'] < 0) & (df['Prev_Core_Sig'] >= 0)) | ((df['Swing_Sig'] < 0) & (df['Prev_Swing_Sig'] >= 0)), df['Close'], np.nan)
+    df['Position_Exit'] = np.where(((df['Prev_Core_Sig'] > 0) & (df['Core_Sig'] <= 0)) | ((df['Prev_Core_Sig'] < 0) & (df['Core_Sig'] >= 0)) | ((df['Prev_Swing_Sig'] < 0) & (df['Swing_Sig'] >= 0)), df['Close'], np.nan)
+    df['Stop_Out'] = stop_out_points
     
     df['Ret_3x'] = df['Ret'] * 3
     df['Ret_1x'] = df['Ret']
-    
     df['Core_Ret'] = np.where(df['Core_Sig'] > 0, df['Ret_3x'] * df['Core_Sig'], np.where(df['Core_Sig'] < 0, df['Ret_1x'] * df['Core_Sig'], 0))
     df['Swing_Ret'] = np.where(df['Swing_Sig'] < 0, df['Ret_1x'] * df['Swing_Sig'], 0)
-    
     df['Total_Strat_Ret'] = df['Core_Ret'] + df['Swing_Ret']
     
     last = df.iloc[-1]
@@ -187,13 +242,13 @@ def run_strategy(df):
     elif last['Swing_Sig'] < 0: signal, leverage = "SWING SHORT", abs(last['Swing_Sig']) * 1.0
     else: signal, leverage = "CASH (Regime Filtered)", 0.0
         
-    return df, last, signal, leverage, core_entry_price, swing_entry_price
+    return df, last, signal, leverage, core_entry_price, swing_entry_price, df_trades
 
 # --- 3. UI RENDERING ---
 st.title("Systematic 4-Quadrant Strategy (USD)")
 
 df_market = load_data()
-df_strat, latest_data, current_signal, target_leverage, c_entry, s_entry = run_strategy(df_market)
+df_strat, latest_data, current_signal, target_leverage, c_entry, s_entry, df_trades = run_strategy(df_market)
 
 display_price = latest_data['Close']
 avg_entry = c_entry if c_entry > 0 else s_entry
@@ -211,38 +266,28 @@ st.markdown("#### Interactive Strategy Map")
 df_plot = df_strat.tail(600).copy()
 
 fig = go.Figure()
-
 fig.add_trace(go.Scatter(x=df_plot['Date'], y=df_plot['Close'], name='NDX Close', line=dict(color='#1f77b4', width=2)))
 fig.add_trace(go.Scatter(x=df_plot['Date'], y=df_plot['EMA_60'], name='EMA 60 (Fast)', line=dict(color='#ff7f0e', width=1.5, dash='dash')))
 fig.add_trace(go.Scatter(x=df_plot['Date'], y=df_plot['EMA_230'], name='EMA 230 (Slow)', line=dict(color='#d62728', width=1.5, dash='dot')))
 
 fig.add_trace(go.Scatter(
-    x=df_plot['Date'], y=df_plot['Long_Entry'],
-    name='Long Entry Trigger',
-    mode='markers',
-    marker=dict(symbol='triangle-up', size=11, color='#2ca02c', line=dict(width=1, color='black')),
+    x=df_plot['Date'], y=df_plot['Long_Entry'], name='Long Entry Trigger',
+    mode='markers', marker=dict(symbol='triangle-up', size=11, color='#2ca02c', line=dict(width=1, color='black')),
     hovertemplate='<b>Long Entry</b><br>Date: %{x}<br>Price: $%{y:,.2f}<extra></extra>'
 ))
-
 fig.add_trace(go.Scatter(
-    x=df_plot['Date'], y=df_plot['Short_Entry'],
-    name='Short Entry Trigger',
-    mode='markers',
-    marker=dict(symbol='triangle-down', size=11, color='#d62728', line=dict(width=1, color='black')),
+    x=df_plot['Date'], y=df_plot['Short_Entry'], name='Short Entry Trigger',
+    mode='markers', marker=dict(symbol='triangle-down', size=11, color='#d62728', line=dict(width=1, color='black')),
     hovertemplate='<b>Short Entry</b><br>Date: %{x}<br>Price: $%{y:,.2f}<extra></extra>'
 ))
-
 fig.add_trace(go.Scatter(
-    x=df_plot['Date'], y=df_plot['Position_Exit'],
-    name='Position Closed (Exit/Cover)',
-    mode='markers',
-    marker=dict(symbol='x', size=10, color='purple', line=dict(width=1.5, color='black')),
+    x=df_plot['Date'], y=df_plot['Position_Exit'], name='Position Closed',
+    mode='markers', marker=dict(symbol='x', size=10, color='purple', line=dict(width=1.5, color='black')),
     hovertemplate='<b>Position Exited</b><br>Date: %{x}<br>Price: $%{y:,.2f}<extra></extra>'
 ))
 
 fig.update_layout(
-    template='plotly_white',
-    hovermode='x unified',
+    template='plotly_white', hovermode='x unified',
     xaxis=dict(title="Date", rangeslider=dict(visible=True)),
     yaxis=dict(title="Nasdaq 100 Price (USD)", side="right"),
     margin=dict(l=10, r=10, t=20, b=10),
@@ -279,10 +324,7 @@ alpha_60, alpha_230 = 2 / 61, 2 / 231
 ema60_today, ema230_today = latest_data['EMA_60'], latest_data['EMA_230']
 trend_flip_tomorrow = ((1 - alpha_230) * ema230_today - (1 - alpha_60) * ema60_today) / (alpha_60 - alpha_230)
 
-st.markdown("*(These are the exact mathematical price levels or conditions required to trigger a new trade execution or state change in tomorrow's session).*")
-
 col_t1, col_t2 = st.columns(2)
-
 with col_t1:
     st.subheader("Macro Trend & Exits")
     if trend_flip_tomorrow > 0 and trend_flip_tomorrow < (c_today * 2):
@@ -303,7 +345,6 @@ with col_t1:
 
 with col_t2:
     st.subheader("Pending Entry Conditions")
-    
     if "CASH" in current_signal:
         if latest_data['Bull'] and latest_data['Volatile']:
             st.write("**Waiting for Volatility to Subside or Trend to Flip.**")
@@ -316,16 +357,13 @@ with col_t2:
             else:
                 st.write(f"- **To enter SWING SHORT (Stage 1):** RSI > 70 (Target: **${get_rsi_target(70):,.2f}**)")
                 st.write(f"*(Note: Price must also close below EMA 10: ${latest_data['EMA_10']:,.2f})*")
-                
     elif "CORE LONG" in current_signal:
         st.write("**Status: Fully Invested.**")
         st.write("No new entry conditions pending. Riding the Bull Quiet trend.")
-        
     elif "CORE SHORT" in current_signal:
         st.write("**Waiting for Further RSI Spikes to Scale In:**")
         st.write(f"- **Stage 2 (RSI > 80):** **${get_rsi_target(80):,.2f}**")
         st.write(f"- **Stage 3 (RSI > 85):** **${get_rsi_target(85):,.2f}**")
-        
     elif "SWING SHORT" in current_signal:
         st.write("**Waiting for Further RSI Spikes to Scale In:**")
         st.write(f"- **Stage 2 (RSI > 80):** **${get_rsi_target(80):,.2f}**")
@@ -355,15 +393,47 @@ for yr in sorted(years, reverse=True):
     df_yr = df_metrics[df_metrics['Date'].dt.year == yr]
     strat_perf = (1 + df_yr['Total_Strat_Ret']).prod() - 1
     bh_perf = (1 + df_yr['Ret']).prod() - 1
-    yearly_stats.append({
-        'Year': yr,
-        'Strategy Return': f"{strat_perf*100:.2f}%",
-        'Benchmark (1x) Return': f"{bh_perf*100:.2f}%"
-    })
+    yearly_stats.append({'Year': yr, 'Strategy Return': f"{strat_perf*100:.2f}%", 'Benchmark (1x) Return': f"{bh_perf*100:.2f}%"})
 st.dataframe(pd.DataFrame(yearly_stats), use_container_width=True)
 
+# --- NEW: SECTION 5 - TRADE LEDGER ---
 st.markdown("---")
-st.header("5. Trade Log & Portfolio Tracker")
+st.header("5. Historical Trade Ledger")
+
+if not df_trades.empty:
+    # Use Exit Date year for the dropdown (if Open, use Entry Date year)
+    df_trades['Year'] = df_trades['Exit Date'].dt.year.fillna(df_trades['Entry Date'].dt.year).astype(int)
+    
+    trade_years = sorted(df_trades['Year'].unique(), reverse=True)
+    selected_year = st.selectbox("Select Year to View Trades", options=trade_years)
+    
+    df_yr_trades = df_trades[df_trades['Year'] == selected_year].copy()
+    
+    # Reorder columns for clarity
+    df_yr_trades = df_yr_trades[['Type', 'Entry Date', 'Entry Condition', 'Entry Price', 'Exit Date', 'Exit Condition', 'Exit Price', 'PnL (%)']]
+    
+    # Format Dates and strings for display
+    df_yr_trades['Entry Date'] = df_yr_trades['Entry Date'].dt.strftime('%Y-%m-%d')
+    df_yr_trades['Exit Date'] = df_yr_trades['Exit Date'].dt.strftime('%Y-%m-%d').fillna("OPEN")
+    
+    def color_pnl(val):
+        if pd.isna(val): return ''
+        color = '#2ca02c' if val > 0 else '#d62728' if val < 0 else 'gray'
+        return f'color: {color}; font-weight: bold;'
+        
+    styled_trades = df_yr_trades.style.format({
+        'Entry Price': '${:,.2f}',
+        'Exit Price': '${:,.2f}',
+        'PnL (%)': '{:+.2f}%'
+    }, na_rep="N/A").applymap(color_pnl, subset=['PnL (%)'])
+    
+    st.dataframe(styled_trades, use_container_width=True, hide_index=True)
+else:
+    st.write("No trades generated yet.")
+
+# --- SECTION 6 - MANUAL PORTFOLIOS ---
+st.markdown("---")
+st.header("6. Trade Log & Portfolio Tracker")
 
 with st.form("trade_entry"):
     st.subheader("Log New Trade Execution")
