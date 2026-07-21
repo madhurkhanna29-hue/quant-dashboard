@@ -64,7 +64,6 @@ def run_strategy(df):
     short_regime_blocked = False
     swing_regime_blocked = False
     
-    # NEW: Trade Ledger Trackers
     trade_log = []
     active_long = None
     active_core_short = None
@@ -150,9 +149,7 @@ def run_strategy(df):
             swing_regime_blocked = False
             swing_sig.append(0.0)
 
-        # ==========================================
         # --- TRADE LOGGING ENGINE ---
-        # ==========================================
         current_date = df['Date'].iloc[i]
         c_sig = core_sig[-1]
         p_sig = core_sig[-2] if len(core_sig) > 1 else 0.0
@@ -202,7 +199,6 @@ def run_strategy(df):
             trade_log.append(active_swing_short)
             active_swing_short = None
 
-    # Append Open Trades at the end
     last_price = df['Close'].iloc[-1]
     if active_long:
         active_long['Exit Date'], active_long['Exit Price'], active_long['Exit Condition'] = pd.NaT, np.nan, 'Trade Open'
@@ -219,6 +215,10 @@ def run_strategy(df):
 
     df_trades = pd.DataFrame(trade_log)
 
+    # FIX: Explicitly map lists into DataFrame columns BEFORE shifting
+    df['Core_Sig'] = core_sig
+    df['Swing_Sig'] = swing_sig
+    
     df['Core_Sig'] = df['Core_Sig'].shift(1).fillna(0)
     df['Swing_Sig'] = df['Swing_Sig'].shift(1).fillna(0)
     
@@ -396,12 +396,10 @@ for yr in sorted(years, reverse=True):
     yearly_stats.append({'Year': yr, 'Strategy Return': f"{strat_perf*100:.2f}%", 'Benchmark (1x) Return': f"{bh_perf*100:.2f}%"})
 st.dataframe(pd.DataFrame(yearly_stats), use_container_width=True)
 
-# --- NEW: SECTION 5 - TRADE LEDGER ---
 st.markdown("---")
 st.header("5. Historical Trade Ledger")
 
 if not df_trades.empty:
-    # Use Exit Date year for the dropdown (if Open, use Entry Date year)
     df_trades['Year'] = df_trades['Exit Date'].dt.year.fillna(df_trades['Entry Date'].dt.year).astype(int)
     
     trade_years = sorted(df_trades['Year'].unique(), reverse=True)
@@ -409,10 +407,8 @@ if not df_trades.empty:
     
     df_yr_trades = df_trades[df_trades['Year'] == selected_year].copy()
     
-    # Reorder columns for clarity
     df_yr_trades = df_yr_trades[['Type', 'Entry Date', 'Entry Condition', 'Entry Price', 'Exit Date', 'Exit Condition', 'Exit Price', 'PnL (%)']]
     
-    # Format Dates and strings for display
     df_yr_trades['Entry Date'] = df_yr_trades['Entry Date'].dt.strftime('%Y-%m-%d')
     df_yr_trades['Exit Date'] = df_yr_trades['Exit Date'].dt.strftime('%Y-%m-%d').fillna("OPEN")
     
@@ -431,7 +427,6 @@ if not df_trades.empty:
 else:
     st.write("No trades generated yet.")
 
-# --- SECTION 6 - MANUAL PORTFOLIOS ---
 st.markdown("---")
 st.header("6. Trade Log & Portfolio Tracker")
 
@@ -472,4 +467,3 @@ for port_name, holdings in st.session_state.portfolios.items():
         st.write("No active trades logged.")
         
 st.markdown(f"**Working Capital Base:** ${st.session_state.cash_usd:,.2f}")
-
