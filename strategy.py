@@ -57,7 +57,6 @@ def run_strategy(df):
     df['Volatile'] = df['HV_Rank'] >= 0.85
 
     core_sig, swing_sig = [], []
-    stop_out_points = np.full(len(df), np.nan)
     
     short_exposure, swing_exposure = 0.0, 0.0
     core_entry_price, swing_entry_price = 0.0, 0.0
@@ -78,18 +77,15 @@ def run_strategy(df):
             core_entry_price = 0.0
             short_regime_blocked = False
             
-            # Pure regime adherence
+            # Pure regime adherence. 
             core_sig.append(1.0 * size_mult)
                 
         elif bear and v:
-            # 5% Hard Stop on the short side ONLY
             if short_exposure < 0 and core_entry_price > 0 and price > core_entry_price * 1.05:
-                stop_out_points[i] = price
                 short_exposure = 0.0
                 core_entry_price = 0.0
                 short_regime_blocked = True
                 
-            # Unblock shorting once the squeeze exhausts
             if rsi < 50:
                 short_exposure = 0.0
                 core_entry_price = 0.0
@@ -116,7 +112,6 @@ def run_strategy(df):
         # --- SWING SYSTEM ---
         if core_sig[-1] == 0:
             if swing_exposure < 0 and swing_entry_price > 0 and price > swing_entry_price * 1.05:
-                stop_out_points[i] = price
                 swing_exposure = 0.0
                 swing_entry_price = 0.0
                 swing_regime_blocked = True
@@ -151,26 +146,35 @@ def run_strategy(df):
 
     df['Core_Sig'] = core_sig
     df['Swing_Sig'] = swing_sig
-    df['Stop_Out'] = stop_out_points
     
     df['Core_Sig'] = df['Core_Sig'].shift(1).fillna(0)
     df['Swing_Sig'] = df['Swing_Sig'].shift(1).fillna(0)
     
-    # Calculate Plot Triggers
+    # --- CHART LOGIC FIX: Explicitly mapping Entry & Exits ---
     df['Prev_Core_Sig'] = df['Core_Sig'].shift(1).fillna(0)
     df['Prev_Swing_Sig'] = df['Swing_Sig'].shift(1).fillna(0)
     
+    # Long triggers when signal shifts from 0 or negative to positive
     df['Long_Entry'] = np.where((df['Core_Sig'] > 0) & (df['Prev_Core_Sig'] <= 0), df['Close'], np.nan)
+    
+    # Short triggers when signal shifts from 0 or positive to negative
     df['Short_Entry'] = np.where(
         ((df['Core_Sig'] < 0) & (df['Prev_Core_Sig'] >= 0)) | 
         ((df['Swing_Sig'] < 0) & (df['Prev_Swing_Sig'] >= 0)), 
         df['Close'], np.nan
     )
     
+    # Exit triggers when returning to CASH (0) from any position, or instantly flipping regimes
+    df['Position_Exit'] = np.where(
+        ((df['Prev_Core_Sig'] > 0) & (df['Core_Sig'] <= 0)) | 
+        ((df['Prev_Core_Sig'] < 0) & (df['Core_Sig'] >= 0)) |
+        ((df['Prev_Swing_Sig'] < 0) & (df['Swing_Sig'] >= 0)), 
+        df['Close'], np.nan
+    )
+    
     df['Ret_3x'] = df['Ret'] * 3
     df['Ret_1x'] = df['Ret']
     
-    # Core Long is exposed to 3x. Shorting is strictly capped at 1x to prevent inverse decay and blowups.
     df['Core_Ret'] = np.where(df['Core_Sig'] > 0, df['Ret_3x'] * df['Core_Sig'], np.where(df['Core_Sig'] < 0, df['Ret_1x'] * df['Core_Sig'], 0))
     df['Swing_Ret'] = np.where(df['Swing_Sig'] < 0, df['Ret_1x'] * df['Swing_Sig'], 0)
     
@@ -203,7 +207,6 @@ with col2: st.metric(label="Target Leverage", value=f"{target_leverage:.2f}x")
 with col3: st.metric(label="Nasdaq 100 (Live Data)", value=f"${display_price:,.2f}")
 with col4: st.metric(label="Avg Entry Price", value=f"${avg_entry:,.2f}" if avg_entry > 0 else "N/A")
 
-# --- CHART RESTORED HERE ---
 st.markdown("#### Interactive Strategy Map")
 df_plot = df_strat.tail(600).copy()
 
@@ -230,11 +233,11 @@ fig.add_trace(go.Scatter(
 ))
 
 fig.add_trace(go.Scatter(
-    x=df_plot['Date'], y=df_plot['Stop_Out'],
-    name='Short Stop Out Hit (5%)',
+    x=df_plot['Date'], y=df_plot['Position_Exit'],
+    name='Position Closed (Exit/Cover)',
     mode='markers',
-    marker=dict(symbol='x', size=10, color='#ff7f0e', line=dict(width=1.5, color='black')),
-    hovertemplate='<b>Stop Loss Triggered</b><br>Date: %{x}<br>Price: $%{y:,.2f}<extra></extra>'
+    marker=dict(symbol='x', size=10, color='purple', line=dict(width=1.5, color='black')),
+    hovertemplate='<b>Position Exited</b><br>Date: %{x}<br>Price: $%{y:,.2f}<extra></extra>'
 ))
 
 fig.update_layout(
@@ -399,3 +402,4 @@ for port_name, holdings in st.session_state.portfolios.items():
         st.write("No active trades logged.")
         
 st.markdown(f"**Working Capital Base:** ${st.session_state.cash_usd:,.2f}")
+
