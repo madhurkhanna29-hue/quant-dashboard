@@ -421,7 +421,7 @@ if not df_trades.empty:
         'Entry Price': '${:,.2f}',
         'Exit Price': '${:,.2f}',
         'PnL (%)': '{:+.2f}%'
-    }, na_rep="N/A").applymap(color_pnl, subset=['PnL (%)'])
+    }, na_rep="N/A").map(color_pnl, subset=['PnL (%)'])
     
     st.dataframe(styled_trades, use_container_width=True, hide_index=True)
 else:
