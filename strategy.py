@@ -76,6 +76,10 @@ def run_strategy(df):
         q, v = df['Quiet'].iloc[i], df['Volatile'].iloc[i]
         ema_10 = df['EMA_10'].iloc[i]
         size_mult = df['Size_Multiplier'].iloc[i] if not pd.isna(df['Size_Multiplier'].iloc[i]) else 1.0
+        
+        # State trackers for the previous day (used for crossover exits)
+        prev_close = df['Close'].iloc[i-1] if i > 0 else price
+        prev_ema_10 = df['EMA_10'].iloc[i-1] if i > 0 else ema_10
 
         # --- CORE SYSTEM ---
         if bull and q:
@@ -84,18 +88,21 @@ def run_strategy(df):
             short_regime_blocked = False
             core_sig.append(1.0 * size_mult)
         elif bear and v:
-            if short_exposure < 0 and core_entry_price > 0 and price > core_entry_price * 1.05:
-                stop_out_points[i] = price
-                short_exposure = 0.0
-                core_entry_price = 0.0
-                short_regime_blocked = True
+            # 1. EVALUATE EXITS FIRST
+            if short_exposure < 0 and core_entry_price > 0:
+                if price > core_entry_price * 1.05:
+                    stop_out_points[i] = price
+                    short_exposure = 0.0
+                    core_entry_price = 0.0
+                    short_regime_blocked = True
                 
-            # NEW EXIT: Trend Trailing EMA-10 instead of RSI
-            if price > ema_10:
-                short_exposure = 0.0
-                core_entry_price = 0.0
-                short_regime_blocked = False
+                # FIXED EXIT: Only trigger if price was below EMA yesterday, and crossed above today
+                elif prev_close < prev_ema_10 and price > ema_10:
+                    short_exposure = 0.0
+                    core_entry_price = 0.0
+                    short_regime_blocked = False
                 
+            # 2. EVALUATE ENTRIES
             if not short_regime_blocked:
                 if short_exposure == 0.0 and rsi > 75:
                     short_exposure = -0.33 * size_mult
@@ -116,17 +123,18 @@ def run_strategy(df):
             
         # --- SWING SYSTEM ---
         if core_sig[-1] == 0:
-            if swing_exposure < 0 and swing_entry_price > 0 and price > swing_entry_price * 1.05:
-                stop_out_points[i] = price
-                swing_exposure = 0.0
-                swing_entry_price = 0.0
-                swing_regime_blocked = True
+            if swing_exposure < 0 and swing_entry_price > 0:
+                if price > swing_entry_price * 1.05:
+                    stop_out_points[i] = price
+                    swing_exposure = 0.0
+                    swing_entry_price = 0.0
+                    swing_regime_blocked = True
                 
-            # NEW EXIT: Trend Trailing EMA-10 instead of RSI
-            if price > ema_10:
-                swing_exposure = 0.0
-                swing_entry_price = 0.0
-                swing_regime_blocked = False
+                # FIXED EXIT
+                elif prev_close < prev_ema_10 and price > ema_10:
+                    swing_exposure = 0.0
+                    swing_entry_price = 0.0
+                    swing_regime_blocked = False
                 
             if bear and q and not swing_regime_blocked:
                 if price < ema_10:
@@ -174,7 +182,7 @@ def run_strategy(df):
         elif c_sig >= 0 and p_sig < 0 and active_core_short:
             active_core_short['Exit Date'] = current_date
             active_core_short['Exit Price'] = price
-            active_core_short['Exit Condition'] = '5% Hard Stop Hit' if short_regime_blocked else ('Take Profit (Price > EMA 10)' if price > ema_10 else 'Regime Shifted')
+            active_core_short['Exit Condition'] = '5% Hard Stop Hit' if short_regime_blocked else ('Take Profit (Price Crossed > EMA 10)' if price > ema_10 else 'Regime Shifted')
             active_core_short['Exit_Idx'] = i
             trade_log.append(active_core_short)
             active_core_short = None
@@ -190,7 +198,7 @@ def run_strategy(df):
         elif s_sig >= 0 and ps_sig < 0 and active_swing_short:
             active_swing_short['Exit Date'] = current_date
             active_swing_short['Exit Price'] = price
-            active_swing_short['Exit Condition'] = '5% Hard Stop Hit' if swing_regime_blocked else ('Take Profit (Price > EMA 10)' if price > ema_10 else 'Regime Shifted')
+            active_swing_short['Exit Condition'] = '5% Hard Stop Hit' if swing_regime_blocked else ('Take Profit (Price Crossed > EMA 10)' if price > ema_10 else 'Regime Shifted')
             active_swing_short['Exit_Idx'] = i
             trade_log.append(active_swing_short)
             active_swing_short = None
@@ -339,10 +347,10 @@ with col_t1:
         st.write("**Macro Trend Flip Level:** Not mathematically possible in 1 day.")
         
     if "CORE SHORT" in current_signal:
-        st.write(f"**Take Profit (Price > EMA 10):** ${latest_data['EMA_10']:,.2f} or higher")
+        st.write(f"**Take Profit (Close > EMA 10):** ${latest_data['EMA_10']:,.2f} or higher")
         st.write(f"**Hard Stop Loss (5%):** ${avg_entry * 1.05:,.2f} or higher")
     elif "SWING SHORT" in current_signal:
-        st.write(f"**Take Profit (Price > EMA 10):** ${latest_data['EMA_10']:,.2f} or higher")
+        st.write(f"**Take Profit (Close > EMA 10):** ${latest_data['EMA_10']:,.2f} or higher")
         st.write(f"**Hard Stop Loss (5%):** ${avg_entry * 1.05:,.2f} or higher")
     elif "CORE LONG" in current_signal:
         st.write("**Exits:** Liquidate to cash if Volatility Rank spikes ≥ 85% or Macro Trend flips bearish.")
