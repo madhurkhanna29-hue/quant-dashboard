@@ -61,8 +61,12 @@ def run_strategy(df):
     
     short_exposure, swing_exposure = 0.0, 0.0
     core_entry_price, swing_entry_price = 0.0, 0.0
+    
+    # Blockers and Watermarks
     short_regime_blocked = False
     swing_regime_blocked = False
+    long_regime_blocked = False
+    long_high_watermark = 0.0
     
     trade_log = []
     active_long = None
@@ -77,7 +81,6 @@ def run_strategy(df):
         ema_10 = df['EMA_10'].iloc[i]
         size_mult = df['Size_Multiplier'].iloc[i] if not pd.isna(df['Size_Multiplier'].iloc[i]) else 1.0
         
-        # State trackers for the previous day (used for crossover exits)
         prev_close = df['Close'].iloc[i-1] if i > 0 else price
         prev_ema_10 = df['EMA_10'].iloc[i-1] if i > 0 else ema_10
 
@@ -86,8 +89,35 @@ def run_strategy(df):
             short_exposure = 0.0
             core_entry_price = 0.0
             short_regime_blocked = False
-            core_sig.append(1.0 * size_mult)
+            
+            # --- LONG TRAILING STOP LOGIC ---
+            if not long_regime_blocked:
+                if long_high_watermark == 0.0:
+                    long_high_watermark = price
+                else:
+                    long_high_watermark = max(long_high_watermark, price)
+                
+                # If price drops 5% from its highest point, eject to cash.
+                if price < long_high_watermark * 0.95:
+                    stop_out_points[i] = price
+                    long_regime_blocked = True
+                    long_high_watermark = 0.0
+                    core_sig.append(0.0)
+                else:
+                    core_sig.append(1.0 * size_mult)
+            else:
+                # Unblock Long if the market recovers back above the 10-day EMA
+                if prev_close < prev_ema_10 and price > ema_10:
+                    long_regime_blocked = False
+                    long_high_watermark = price
+                    core_sig.append(1.0 * size_mult)
+                else:
+                    core_sig.append(0.0)
+                    
         elif bear and v:
+            long_regime_blocked = False
+            long_high_watermark = 0.0
+            
             # 1. EVALUATE EXITS FIRST
             if short_exposure < 0 and core_entry_price > 0:
                 if price > core_entry_price * 1.05:
@@ -96,7 +126,7 @@ def run_strategy(df):
                     core_entry_price = 0.0
                     short_regime_blocked = True
                 
-                # FIXED EXIT: Only trigger if price was below EMA yesterday, and crossed above today
+                # Trend Trailing EMA-10 Crossover Exit
                 elif prev_close < prev_ema_10 and price > ema_10:
                     short_exposure = 0.0
                     core_entry_price = 0.0
@@ -119,6 +149,8 @@ def run_strategy(df):
             short_exposure = 0.0
             core_entry_price = 0.0
             short_regime_blocked = False
+            long_regime_blocked = False
+            long_high_watermark = 0.0
             core_sig.append(0.0)
             
         # --- SWING SYSTEM ---
@@ -130,7 +162,7 @@ def run_strategy(df):
                     swing_entry_price = 0.0
                     swing_regime_blocked = True
                 
-                # FIXED EXIT
+                # Trend Trailing EMA-10 Crossover Exit
                 elif prev_close < prev_ema_10 and price > ema_10:
                     swing_exposure = 0.0
                     swing_entry_price = 0.0
@@ -169,7 +201,7 @@ def run_strategy(df):
         elif c_sig <= 0 and p_sig > 0 and active_long:
             active_long['Exit Date'] = current_date
             active_long['Exit Price'] = price
-            active_long['Exit Condition'] = 'Macro Flipped Bearish' if not bull else 'Volatility Spiked (Rank ≥ 85%)'
+            active_long['Exit Condition'] = '5% Trailing Stop' if long_regime_blocked else ('Macro Flipped Bearish' if not bull else 'Volatility Spiked (Rank ≥ 85%)')
             active_long['Exit_Idx'] = i
             trade_log.append(active_long)
             active_long = None
@@ -256,13 +288,13 @@ def run_strategy(df):
     elif last['Swing_Sig'] < 0: signal, leverage = "SWING SHORT", abs(last['Swing_Sig']) * 1.0
     else: signal, leverage = "CASH (Regime Filtered)", 0.0
         
-    return df, last, signal, leverage, core_entry_price, swing_entry_price, df_trades
+    return df, last, signal, leverage, core_entry_price, swing_entry_price, df_trades, long_high_watermark
 
 # --- 3. UI RENDERING ---
 st.title("Systematic 4-Quadrant Strategy (USD)")
 
 df_market = load_data()
-df_strat, latest_data, current_signal, target_leverage, c_entry, s_entry, df_trades = run_strategy(df_market)
+df_strat, latest_data, current_signal, target_leverage, c_entry, s_entry, df_trades, long_hwm = run_strategy(df_market)
 
 display_price = latest_data['Close']
 avg_entry = c_entry if c_entry > 0 else s_entry
@@ -353,14 +385,18 @@ with col_t1:
         st.write(f"**Take Profit (Close > EMA 10):** ${latest_data['EMA_10']:,.2f} or higher")
         st.write(f"**Hard Stop Loss (5%):** ${avg_entry * 1.05:,.2f} or higher")
     elif "CORE LONG" in current_signal:
-        st.write("**Exits:** Liquidate to cash if Volatility Rank spikes ≥ 85% or Macro Trend flips bearish.")
+        st.write(f"**5% Trailing Stop:** ${long_hwm * 0.95:,.2f} or lower")
+        st.write("**Volatility Exit:** Liquidate to cash if Volatility Rank spikes ≥ 85%.")
     else:
         st.write("**Exits:** Currently in Cash. No active stop-losses.")
 
 with col_t2:
     st.subheader("Pending Entry Conditions")
     if "CASH" in current_signal:
-        if latest_data['Bull'] and latest_data['Volatile']:
+        if latest_data['Bull'] and latest_data['Quiet']:
+            st.write("**Waiting for Market Recovery (Long Blocked):**")
+            st.write(f"- **To re-enter LONG:** Price must close above EMA 10 (${latest_data['EMA_10']:,.2f})")
+        elif latest_data['Bull'] and latest_data['Volatile']:
             st.write("**Waiting for Volatility to Subside or Trend to Flip.**")
             st.write(f"- **To go CORE LONG:** Volatility Rank must drop below 85% (Current: {latest_data['HV_Rank']*100:.1f}%).")
             st.write("- **To go SHORT:** Macro Trend (EMA 60) must cross below EMA 230.")
@@ -482,3 +518,4 @@ for port_name, holdings in st.session_state.portfolios.items():
         st.write("No active trades logged.")
         
 st.markdown(f"**Working Capital Base:** ${st.session_state.cash_usd:,.2f}")
+
