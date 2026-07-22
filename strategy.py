@@ -90,7 +90,8 @@ def run_strategy(df):
                 core_entry_price = 0.0
                 short_regime_blocked = True
                 
-            if rsi < 50:
+            # NEW EXIT: Trend Trailing EMA-10 instead of RSI
+            if price > ema_10:
                 short_exposure = 0.0
                 core_entry_price = 0.0
                 short_regime_blocked = False
@@ -121,7 +122,8 @@ def run_strategy(df):
                 swing_entry_price = 0.0
                 swing_regime_blocked = True
                 
-            if rsi < 40:
+            # NEW EXIT: Trend Trailing EMA-10 instead of RSI
+            if price > ema_10:
                 swing_exposure = 0.0
                 swing_entry_price = 0.0
                 swing_regime_blocked = False
@@ -149,7 +151,7 @@ def run_strategy(df):
             swing_regime_blocked = False
             swing_sig.append(0.0)
 
-        # --- TRADE LOGGING ENGINE (Part 1: Capture Indexes) ---
+        # --- TRADE LOGGING ENGINE ---
         current_date = df['Date'].iloc[i]
         c_sig = core_sig[-1]
         p_sig = core_sig[-2] if len(core_sig) > 1 else 0.0
@@ -172,7 +174,7 @@ def run_strategy(df):
         elif c_sig >= 0 and p_sig < 0 and active_core_short:
             active_core_short['Exit Date'] = current_date
             active_core_short['Exit Price'] = price
-            active_core_short['Exit Condition'] = '5% Hard Stop Hit' if short_regime_blocked else ('Take Profit (RSI < 50)' if rsi < 50 else 'Regime Shifted')
+            active_core_short['Exit Condition'] = '5% Hard Stop Hit' if short_regime_blocked else ('Take Profit (Price > EMA 10)' if price > ema_10 else 'Regime Shifted')
             active_core_short['Exit_Idx'] = i
             trade_log.append(active_core_short)
             active_core_short = None
@@ -188,7 +190,7 @@ def run_strategy(df):
         elif s_sig >= 0 and ps_sig < 0 and active_swing_short:
             active_swing_short['Exit Date'] = current_date
             active_swing_short['Exit Price'] = price
-            active_swing_short['Exit Condition'] = '5% Hard Stop Hit' if swing_regime_blocked else ('Take Profit (RSI < 40)' if rsi < 40 else 'Regime Shifted')
+            active_swing_short['Exit Condition'] = '5% Hard Stop Hit' if swing_regime_blocked else ('Take Profit (Price > EMA 10)' if price > ema_10 else 'Regime Shifted')
             active_swing_short['Exit_Idx'] = i
             trade_log.append(active_swing_short)
             active_swing_short = None
@@ -227,13 +229,10 @@ def run_strategy(df):
     df['Swing_Ret'] = np.where(df['Swing_Sig'] < 0, df['Ret_1x'] * df['Swing_Sig'], 0)
     df['Total_Strat_Ret'] = df['Core_Ret'] + df['Swing_Ret']
     
-    # --- TRADE LOGGING ENGINE (Part 2: True Compounded PnL) ---
-    # We map the exact daily strategy returns to the exact days the trade was active
     for t in trade_log:
         e_idx = t['Entry_Idx']
         x_idx = t['Exit_Idx']
         if e_idx < x_idx:
-            # Compounding the daily returns from the day after entry up to the exit day
             true_pnl = (np.prod(1 + df['Total_Strat_Ret'].iloc[e_idx+1 : x_idx+1]) - 1) * 100
         else:
             true_pnl = 0.0
@@ -340,10 +339,10 @@ with col_t1:
         st.write("**Macro Trend Flip Level:** Not mathematically possible in 1 day.")
         
     if "CORE SHORT" in current_signal:
-        st.write(f"**Take Profit (RSI < 50):** ${get_rsi_target(50):,.2f} or lower")
+        st.write(f"**Take Profit (Price > EMA 10):** ${latest_data['EMA_10']:,.2f} or higher")
         st.write(f"**Hard Stop Loss (5%):** ${avg_entry * 1.05:,.2f} or higher")
     elif "SWING SHORT" in current_signal:
-        st.write(f"**Take Profit (RSI < 40):** ${get_rsi_target(40):,.2f} or lower")
+        st.write(f"**Take Profit (Price > EMA 10):** ${latest_data['EMA_10']:,.2f} or higher")
         st.write(f"**Hard Stop Loss (5%):** ${avg_entry * 1.05:,.2f} or higher")
     elif "CORE LONG" in current_signal:
         st.write("**Exits:** Liquidate to cash if Volatility Rank spikes ≥ 85% or Macro Trend flips bearish.")
@@ -475,4 +474,3 @@ for port_name, holdings in st.session_state.portfolios.items():
         st.write("No active trades logged.")
         
 st.markdown(f"**Working Capital Base:** ${st.session_state.cash_usd:,.2f}")
-
