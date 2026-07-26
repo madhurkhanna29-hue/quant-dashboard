@@ -3,6 +3,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from datetime import datetime
 
 # --- 1. CONFIGURATION & STATE ---
@@ -31,7 +32,6 @@ def load_data():
 def run_strategy(df):
     df['Ret'] = df['Close'].pct_change()
     
-    # Core Trend Filter (60/230 EMA)
     df['EMA_60'] = df['Close'].ewm(span=60, adjust=False).mean()
     df['EMA_230'] = df['Close'].ewm(span=230, adjust=False).mean()
     df['Bull'] = df['EMA_60'] > df['EMA_230']
@@ -89,13 +89,10 @@ def run_strategy(df):
             short_regime_blocked = False
             
             if hv_rank < 0.70:
-                # Tier 1: Full 3x allocation during clean bull runs
                 core_sig.append(1.0)
             elif hv_rank < 0.85:
-                # Tier 2: ATR-sized allocation during elevated volatility
                 core_sig.append(1.0 * size_mult)
             else:
-                # Tier 3: High volatility warning -> Cash
                 core_sig.append(0.0)
                 
         elif bear and v:
@@ -281,38 +278,57 @@ with col2: st.metric(label="Target Leverage", value=f"{target_leverage:.2f}x")
 with col3: st.metric(label="Nasdaq 100 (Live Data)", value=f"${display_price:,.2f}")
 with col4: st.metric(label="Avg Entry Price", value=f"${avg_entry:,.2f}" if avg_entry > 0 else "N/A")
 
-st.markdown("#### Interactive Strategy Map")
-df_plot = df_strat.tail(600).copy()
+# --- MULTI-PANEL DIAGNOSTIC CHART ---
+st.markdown("#### Multi-Parameter Strategy Diagnostics")
+df_plot = df_strat.tail(500).copy()
 
-fig = go.Figure()
-fig.add_trace(go.Scatter(x=df_plot['Date'], y=df_plot['Close'], name='NDX Close', line=dict(color='#1f77b4', width=2)))
-fig.add_trace(go.Scatter(x=df_plot['Date'], y=df_plot['EMA_60'], name='EMA 60 (Fast)', line=dict(color='#ff7f0e', width=1.5, dash='dash')))
-fig.add_trace(go.Scatter(x=df_plot['Date'], y=df_plot['EMA_230'], name='EMA 230 (Slow)', line=dict(color='#d62728', width=1.5, dash='dot')))
+fig = make_subplots(
+    rows=4, cols=1, shared_xaxes=True,
+    vertical_spacing=0.03,
+    subplot_titles=(
+        'Nasdaq 100 Price & Macro Trend (60/230 EMA)', 
+        'Volatility Rank (HV Rank 85% Threshold)', 
+        '2-Day RSI (Short Squeeze Thresholds)', 
+        'ATR Position Size Multiplier'
+    ),
+    row_heights=[0.4, 0.2, 0.2, 0.2]
+)
 
-fig.add_trace(go.Scatter(
-    x=df_plot['Date'], y=df_plot['Long_Entry'], name='Long Entry Trigger',
-    mode='markers', marker=dict(symbol='triangle-up', size=11, color='#2ca02c', line=dict(width=1, color='black')),
-    hovertemplate='<b>Long Entry</b><br>Date: %{x}<br>Price: $%{y:,.2f}<extra></extra>'
-))
-fig.add_trace(go.Scatter(
-    x=df_plot['Date'], y=df_plot['Short_Entry'], name='Short Entry Trigger',
-    mode='markers', marker=dict(symbol='triangle-down', size=11, color='#d62728', line=dict(width=1, color='black')),
-    hovertemplate='<b>Short Entry</b><br>Date: %{x}<br>Price: $%{y:,.2f}<extra></extra>'
-))
-fig.add_trace(go.Scatter(
-    x=df_plot['Date'], y=df_plot['Position_Exit'], name='Position Closed',
-    mode='markers', marker=dict(symbol='x', size=10, color='purple', line=dict(width=1.5, color='black')),
-    hovertemplate='<b>Position Exited</b><br>Date: %{x}<br>Price: $%{y:,.2f}<extra></extra>'
-))
+# Row 1: Price & EMAs + Triggers
+fig.add_trace(go.Scatter(x=df_plot['Date'], y=df_plot['Close'], name='NDX Close', line=dict(color='#1f77b4', width=2)), row=1, col=1)
+fig.add_trace(go.Scatter(x=df_plot['Date'], y=df_plot['EMA_60'], name='EMA 60', line=dict(color='#ff7f0e', width=1.5, dash='dash')), row=1, col=1)
+fig.add_trace(go.Scatter(x=df_plot['Date'], y=df_plot['EMA_230'], name='EMA 230', line=dict(color='#d62728', width=1.5, dash='dot')), row=1, col=1)
+fig.add_trace(go.Scatter(x=df_plot['Date'], y=df_plot['Long_Entry'], name='Long Entry', mode='markers', marker=dict(symbol='triangle-up', size=10, color='#2ca02c')), row=1, col=1)
+fig.add_trace(go.Scatter(x=df_plot['Date'], y=df_plot['Short_Entry'], name='Short Entry', mode='markers', marker=dict(symbol='triangle-down', size=10, color='#d62728')), row=1, col=1)
+fig.add_trace(go.Scatter(x=df_plot['Date'], y=df_plot['Position_Exit'], name='Exit', mode='markers', marker=dict(symbol='x', size=9, color='purple')), row=1, col=1)
+
+# Row 2: Volatility Rank
+fig.add_trace(go.Scatter(x=df_plot['Date'], y=df_plot['HV_Rank'] * 100, name='HV Rank (%)', line=dict(color='#9467bd', width=1.5)), row=2, col=1)
+fig.add_hline(y=85, line_dash="dash", line_color="red", annotation_text="Quiet/Volatile Limit (85%)", row=2, col=1)
+fig.add_hline(y=70, line_dash="dot", line_color="orange", annotation_text="Tier 1/2 Limit (70%)", row=2, col=1)
+
+# Row 3: 2-Day RSI
+fig.add_trace(go.Scatter(x=df_plot['Date'], y=df_plot['RSI_2'], name='RSI (2)', line=dict(color='#8c564b', width=1.5)), row=3, col=1)
+fig.add_hline(y=75, line_dash="dash", line_color="red", annotation_text="Core Short (75)", row=3, col=1)
+fig.add_hline(y=70, line_dash="dot", line_color="orange", annotation_text="Swing Short (70)", row=3, col=1)
+fig.add_hline(y=50, line_dash="dot", line_color="gray", annotation_text="RSI 50", row=3, col=1)
+
+# Row 4: ATR Size Multiplier
+fig.add_trace(go.Scatter(x=df_plot['Date'], y=df_plot['Size_Multiplier'], name='Size Multiplier', line=dict(color='#2ca02c', width=1.5)), row=4, col=1)
+fig.add_hline(y=1.0, line_dash="dot", line_color="gray", annotation_text="Full Size (1.0x)", row=4, col=1)
 
 fig.update_layout(
-    template='plotly_white', hovermode='x unified',
-    xaxis=dict(title="Date", rangeslider=dict(visible=True)),
-    yaxis=dict(title="Nasdaq 100 Price (USD)", side="right"),
-    margin=dict(l=10, r=10, t=20, b=10),
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-    height=470
+    template='plotly_white',
+    hovermode='x unified',
+    height=800,
+    margin=dict(l=10, r=10, t=30, b=10),
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
 )
+
+fig.update_yaxes(title_text="Price (USD)", row=1, col=1, side="right")
+fig.update_yaxes(title_text="HV Rank %", row=2, col=1, side="right")
+fig.update_yaxes(title_text="RSI Value", row=3, col=1, side="right")
+fig.update_yaxes(title_text="Multiplier", row=4, col=1, side="right")
 
 st.plotly_chart(fig, use_container_width=True)
 st.markdown("---")
